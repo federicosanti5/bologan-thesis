@@ -1,0 +1,31 @@
+{
+    "experiment_id": "exp_20250824_015503",
+    "task": "train",
+    "input_file": "/home/saint/Documents/UNIBO/tesi/FastCaloChallenge/input/dataset1/dataset_1_pions_1.hdf5",
+    "config_string": "BNReLU_hpo27-M1",
+    "config_details": {
+        "model": "BNReLU",
+        "config_file": "config/config_hpo27.json",
+        "mask": "1",
+        "prep": "",
+        "label_scheme": "",
+        "split_energy": ""
+    },
+    "start_time": "Sun Aug 24 01:55:03 CEST 2025",
+    "hostname": "saint-XPS-13-9370",
+    "user": "atlas",
+    "pwd": "/home/saint/Documents/UNIBO/tesi/FastCaloChallenge/training",
+    "git_commit": "2e8918162ec5d62fcd63eb761ccc91505e4e5299",
+    "git_branch": "CaloChalenge",
+    "container_info": {
+        "apptainer_version": "1.4.2",
+        "container_path": "/home/saint/Documents/UNIBO/tesi/containers/FastCaloGANtainer_Plus.sif"
+    },
+    "system_info": {
+        "kernel": "5.15.0-126-generic",
+        "os": "CentOS Linux 7 (Core)",
+        "cpu_info": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+        "memory_total": "15G",
+        "cpu_cores": "8"
+    }
+}

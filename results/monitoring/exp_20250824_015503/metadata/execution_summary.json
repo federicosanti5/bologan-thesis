@@ -1,0 +1,10 @@
+{
+    "execution_summary": {
+        "task": "train",
+        "start_timestamp": 1755993303,
+        "end_timestamp": 1755993328,
+        "duration_seconds": 25,
+        "duration_formatted": "0h 0m 25s",
+        "experiment_dir": "/home/saint/Documents/UNIBO/tesi/results/monitoring/exp_20250824_015503"
+    }
+}

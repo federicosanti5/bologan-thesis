@@ -1,0 +1,15 @@
+2025-08-24 01:55:05.346217: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcudart.so.11.0'; dlerror: libcudart.so.11.0: cannot open shared object file: No such file or directory; LD_LIBRARY_PATH: /.singularity.d/libs
+2025-08-24 01:55:05.346234: I tensorflow/stream_executor/cuda/cudart_stub.cc:29] Ignore above cudart dlerror if you do not have a GPU set up on your machine.
+2025-08-24 01:55:10.121942: W tensorflow/stream_executor/platform/default/dso_loader.cc:64] Could not load dynamic library 'libcuda.so.1'; dlerror: libcuda.so.1: cannot open shared object file: No such file or directory; LD_LIBRARY_PATH: /.singularity.d/libs
+2025-08-24 01:55:10.121964: W tensorflow/stream_executor/cuda/cuda_driver.cc:269] failed call to cuInit: UNKNOWN ERROR (303)
+2025-08-24 01:55:10.121978: I tensorflow/stream_executor/cuda/cuda_diagnostics.cc:156] kernel driver does not appear to be running on this host (saint-XPS-13-9370): /proc/driver/nvidia/version does not exist
+2025-08-24 01:55:10.123684: I tensorflow/core/platform/cpu_feature_guard.cc:142] This TensorFlow binary is optimized with oneAPI Deep Neural Network Library (oneDNN) to use the following CPU instructions in performance-critical operations:  AVX2 FMA
+To enable them in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2025-08-24 01:55:10,177 Use model BNReLU
+2025-08-24 01:55:10,312 configuration {"particle": "pions", "eta_slice": "20_25", "checkpoint_interval": 1000, "output": "../output/dataset1/v2/BNReLU_hpo27-M1", "max_iter": 10, "cache": false, "loading": null}, {"model": "BNReLU", "G_size": 4, "D_size": 1, "optimizer": "adam", "G_lr": 0.0001, "D_lr": 0.0001, "G_beta1": 0.5, "D_beta1": 0.5, "batchsize": 1024, "dgratio": 5, "latent_dim": 50, "lam": 20, "conditional_dim": 1, "generatorLayers": [50, 100, 200], "discriminatorLayers": [800, 400, 200], "nvoxels": 533, "use_bias": true, "preprocess": null, "label_scheme": "log_ratio"}
+2025-08-24 01:55:18,040 Training size X: (120230, 533), label: (120230, 1)
+2025-08-24 01:55:18,552 Iter: 0; Dloss: 0.0000; Gloss: 0.0000; TotalTime: 0.51; GetNext: 0.0000, ConvertLoop: 0.00, TrainLoop: 0.00, Save: 0.036
+2025-08-24 01:55:20,110 latent dist normal mean 0.5 std 0.5
+2025-08-24 01:55:21.853240: I tensorflow/compiler/mlir/mlir_graph_optimization_pass.cc:185] None of the MLIR Optimization Passes are enabled (registered 2)
+2025-08-24 01:55:27,943 Save to ../output/dataset1/v2/BNReLU_hpo27-M1/pions_eta_20_25/train/loss.pdf
+2025-08-24 01:55:28.043117: W tensorflow/core/kernels/data/cache_dataset_ops.cc:768] The calling iterator did not fully read the dataset being cached. In order to avoid unexpected truncation of the dataset, the partially cached contents of the dataset  will be discarded. This can happen if you have an input pipeline similar to `dataset.cache().take(k).repeat()`. You should use `dataset.take(k).cache().repeat()` instead.

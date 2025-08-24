@@ -1,0 +1,9 @@
+**/.ipynb_checkpoints
+homepage/
+**/__pycache__
+FastCaloChallenge/input/
+FastCaloChallenge/output/
+**/.Xauthority
+**/.bash_history
+FastCaloChallenge/condor/log/
+containers/

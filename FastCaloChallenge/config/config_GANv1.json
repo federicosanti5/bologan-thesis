@@ -1,0 +1,18 @@
+{
+    "D_lr": 0.0001,
+    "D_size": 1,
+    "G_beta1": 0.5,
+    "G_lr": 0.0001,
+    "G_size": 1,
+    "batchsize": 128,
+    "conditional_dim": 1,
+    "dgratio": 5,
+    "generatorLayers": [
+        50,
+        100,
+        200
+    ],
+    "lam": 10,
+    "latent_dim": 50,
+    "use_bias": true
+}

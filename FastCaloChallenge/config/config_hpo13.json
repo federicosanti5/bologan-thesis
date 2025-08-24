@@ -1,0 +1,6 @@
+{
+    "G_size": 2,
+    "D_size": 1,
+    "batchsize": 512,
+    "lam": 20
+}

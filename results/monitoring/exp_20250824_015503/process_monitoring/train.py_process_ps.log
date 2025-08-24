@@ -1,0 +1,26 @@
+  13494   13386 python3 train.py -i /home/s  0.0  0.0  6524  21920       00:00
+  13494   13386 python3 train.py -i /home/s  0.5  148 90200 2034388      00:01
+  13494   13386 python3 train.py -i /home/s  1.4 93.5 232204 2128092     00:02
+  13494   13386 python3 train.py -i /home/s  1.7  111 284816 2533228     00:03
+  13494   13386 python3 train.py -i /home/s  2.0  101 328836 2674324     00:04
+  13494   13386 python3 train.py -i /home/s  3.7  100 607580 3258416     00:05
+  13494   13386 python3 train.py -i /home/s  5.4 85.5 883984 4407824     00:07
+  13494   13386 python3 train.py -i /home/s  8.8 87.6 1431288 5044364    00:08
+  13494   13386 python3 train.py -i /home/s  8.8 89.3 1428868 5023268    00:09
+  13494   13386 python3 train.py -i /home/s  8.9 99.8 1433420 5216192    00:10
+  13494   13386 python3 train.py -i /home/s  8.9  100 1438352 5221312    00:11
+  13494   13386 python3 train.py -i /home/s  8.9  100 1442456 5225408    00:12
+  13494   13386 python3 train.py -i /home/s  8.9  100 1445900 5230604    00:13
+  13494   13386 python3 train.py -i /home/s  8.9  100 1447312 5231884    00:14
+  13494   13386 python3 train.py -i /home/s 11.5  100 1857556 5732532    00:15
+  13494   13386 python3 train.py -i /home/s 12.6  101 2033808 6484744    00:16
+  13494   13386 python3 train.py -i /home/s  9.5  101 1533500 5984180    00:17
+  13494   13386 python3 train.py -i /home/s  9.5  101 1534232 5984180    00:18
+  13494   13386 python3 train.py -i /home/s 10.6  111 1707540 6110896    00:19
+  13494   13386 python3 train.py -i /home/s 11.1  143 1793828 6176432    00:20
+  13494   13386 python3 train.py -i /home/s 11.3  174 1824376 6176432    00:21
+  13494   13386 python3 train.py -i /home/s 11.4  202 1840964 6176432    00:22
+  13494   13386 python3 train.py -i /home/s 11.5  228 1857860 6176432    00:23
+  13494   13386 python3 train.py -i /home/s 11.6  249 1870136 6176944    00:24
+2025-08-24 01:55:28 Monitoring flag removed, stopping train.py monitor
+2025-08-24 01:55:28 Process monitoring for train.py completed
