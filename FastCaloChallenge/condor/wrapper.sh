@@ -30,6 +30,7 @@ echo split_energy=$split_energy
 if [[ $mask == ?(n)+([0-9]) ]]; then
     version='v2'
     addition="--mask=${mask//n/-}"
+    train_addition="$train_addition $addition"
 #if [[ $mask == ?(n)+([0-9]) ]]; then
 #    version='v3'
 #    train_addition="--mask=${mask//n/-} --add_noise"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # BoloGAN Test Runner - Automation script for thesis experiments
-# Author: Federico Tosoni
+# Author: Federico Santi
 
 set -e  # Exit on any error
 
