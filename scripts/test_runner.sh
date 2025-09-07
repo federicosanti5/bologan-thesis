@@ -11,9 +11,11 @@ set -e  # Exit on any error
 
 BOLOGAN_HOME="/home/saint/Documents/UNIBO/tesi"
 FASTCALO_DIR="${BOLOGAN_HOME}/FastCaloChallenge"
-CONTAINER_PATH="${BOLOGAN_HOME}/containers/FastCaloGANtainer_Plus.sif"
+CONTAINER_PATH="${BOLOGAN_HOME}/containers/FastCaloGANtainer_Plus_Mntr.sif"
 RESULTS_DIR="${BOLOGAN_HOME}/results"
 ENHANCED_WRAPPER="${BOLOGAN_HOME}/scripts/enhanced_wrapper.sh"
+
+CLEANUP_HANDLED=false
 
 # Default parameters
 DEFAULT_DATASET="${FASTCALO_DIR}/input/dataset1/dataset_1_pions_1.hdf5"
@@ -21,6 +23,35 @@ DEFAULT_CONFIG_STRING="BNReLU_hpo27-M1" # BN = Batch Normalize
                                         # ReLu = Funzione di Attivazione ReLu (Rectified Linear Unit)
                                         # hpo27 = Hyper Parameters Optimization Config #27
                                         # M1 = Mask Variant (diversi preprocessing)
+
+# =============================================================================
+# LOGGING FUNCTIONS
+# =============================================================================
+
+log_info() {
+    echo "[$(date '+%H:%M:%S')] INFO: $*"
+}
+
+log_warn() {
+    echo "[$(date '+%H:%M:%S')] WARN: $*" >&2
+}
+
+log_error() {
+    echo "[$(date '+%H:%M:%S')] ERROR: $*" >&2
+}
+
+log_debug() {
+    echo "[$(date '+%H:%M:%S')] DEBUG: $*" >&2
+}
+
+log_section() {
+    echo ""
+    echo "[$(date '+%H:%M:%S')] ========== $* =========="
+}
+
+log_subsection() {
+    echo "[$(date '+%H:%M:%S')] --- $* ---"
+}
 
 # =============================================================================
 # FUNCTIONS
@@ -84,109 +115,299 @@ ENVIRONMENT:
 EOF
 }
 
-check_prerequisites() {
-    echo "--> Checking prerequisites..."
+# Signal handling function for graceful shutdown
+cleanup_runner() {
+    if [[ "$CLEANUP_HANDLED" == true ]]; then
+        log_warn "Cleanup already handled, ignoring additional interrupt"
+        return
+    fi
+
+    CLEANUP_HANDLED=true
+
+    log_section "INTERRUPT SIGNAL RECEIVED"
+    log_info "Initiating graceful shutdown..."
+
+    local latest_exp_dir=""
+    if [[ -d "$RESULTS_DIR/monitoring" ]]; then
+        latest_exp_dir=$(find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+    fi
     
+
+    # Try to signal the enhanced wrapper directly
+    if [[ -n "$latest_exp_dir" && -f "$latest_exp_dir/wrapper_pid.txt" ]]; then
+        local wrapper_pid=$(cat "$latest_exp_dir/wrapper_pid.txt")
+        if [[ -n "$wrapper_pid" && "$wrapper_pid" =~ ^[0-9]+$ ]] && kill -0 "$wrapper_pid" 2>/dev/null; then
+            log_info "Sending graceful shutdown signal to wrapper (PID: $wrapper_pid)"
+            kill -INT "$wrapper_pid" 2>/dev/null || true
+            
+            # Wait for wrapper cleanup
+            local timeout=15
+            local waited=0
+            local wrapper_alive=true
+            
+            while [[ $waited -lt $timeout && "$wrapper_alive" == true ]]; do
+                if ! kill -0 "$wrapper_pid" 2>/dev/null; then
+                    wrapper_alive=false
+                    break
+                fi
+                sleep 1
+                waited=$((waited + 1))
+            done
+            
+            if [[ "$wrapper_alive" == true ]]; then
+                log_warn "Wrapper didn't respond in time, forcing shutdown"
+
+                # Sequential cleanup before killing wrapper
+                if [[ -n "$latest_exp_dir" ]]; then
+
+                    # Removing monitoring flag
+                    rm -f "$latest_exp_dir/monitoring_active" 2>/dev/null || true
+
+                    # Kill Python process first
+                    if [[ -f "$latest_exp_dir/python_pid.txt" ]]; then
+                        local python_pid=$(cat "$latest_exp_dir/python_pid.txt")
+                        if [[ -n "$python_pid" && "$python_pid" =~ ^[0-9]+$ ]] && kill -0 "$python_pid" 2>/dev/null; then
+                            log_info "Force killing Python process (PID: $python_pid)"
+                            kill -KILL "$python_pid" 2>/dev/null || true
+                        fi
+                    fi
+                    
+                    # Kill monitoring processes
+                    if [[ -f "$latest_exp_dir/monitoring_pids.txt" ]]; then
+                        log_info "Force killing monitoring processes"
+                        while read -r pid; do
+                            [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+                        done < "$latest_exp_dir/monitoring_pids.txt" 2>/dev/null || true
+                    fi
+                    
+                    # Clean up files
+                    rm -f "$latest_exp_dir/python_pid.txt" 2>/dev/null || true
+                    rm -f "$latest_exp_dir/monitoring_pids.txt" 2>/dev/null || true
+                    rm -f "$latest_exp_dir/wrapper_pid.txt" 2>/dev/null || true
+                fi
+
+                # Force kill wrapper
+                kill -KILL "$wrapper_pid" 2>/dev/null || true
+            else
+                log_info "Wrapper shutdown completed gracefully"
+            fi
+        fi
+    else
+        log_warn "No wrapper PID found"
+    fi
+
+    # Cleanup container if it exists
+    if [ ! -z "$APPTAINER_PID" ]; then
+        if kill -0 "$APPTAINER_PID" 2>/dev/null; then
+            log_info "Stopping container process (PID: $APPTAINER_PID)"
+            kill -TERM "$APPTAINER_PID" 2>/dev/null || true
+            sleep 3
+            if kill -0 "$APPTAINER_PID" 2>/dev/null; then
+                kill -KILL "$APPTAINER_PID" 2>/dev/null || true
+            fi
+        fi
+    fi
+    
+    log_info "Test runner cleanup completed"
+    exit 130
+}
+
+# Validate experiment arguments
+validate_arguments() {
+    local task=$1
     local issues=0
     
-    # Check directories
+    log_subsection "Argument Validation"
+    
+    # Validate dataset path for experiment tasks
+    if [[ "$task" == "train" || "$task" == "evaluate" || "$task" == "full" ]]; then
+        if [ ! -f "$DATASET" ]; then
+            log_error "Dataset file not found: $DATASET"
+            issues=$((issues + 1))
+        else
+            log_info "Dataset validated: $DATASET"
+        fi
+    fi
+    
+    # Validate max_iter is numeric
+    if [[ ! "$MAX_ITER" =~ ^[0-9]+$ ]]; then
+        log_error "max-iter must be a positive integer: $MAX_ITER"
+        issues=$((issues + 1))
+    else
+        log_info "Max iterations: $MAX_ITER"
+    fi
+    
+    # Validate config string format
+    if [[ ! "$CONFIG_STRING" =~ ^[A-Za-z]+_[A-Za-z0-9]+-M[0-9]+.*$ ]]; then
+        log_warn "Config string may not be valid format: $CONFIG_STRING"
+        log_warn "Expected format: MODEL_CONFIG-MASK (e.g., BNReLU_hpo27-M1)"
+    else
+        log_info "Configuration validated: $CONFIG_STRING"
+    fi
+    
+    # Validate loading args format if provided
+    if [[ -n "$LOADING_ARGS" ]]; then
+        log_info "Loading arguments: $LOADING_ARGS"
+    fi
+    
+    return $issues
+}
+
+# Check common prerequisites (always needed)
+check_common_prerequisites() {
+    log_subsection "Common Prerequisites"
+    local issues=0
+    
+    # Check main directory
     if [ ! -d "$FASTCALO_DIR" ]; then
-        echo "!) FastCaloChallenge directory not found: $FASTCALO_DIR"
+        log_error "FastCaloChallenge directory not found: $FASTCALO_DIR"
         issues=$((issues + 1))
+    else
+        log_info "FastCaloChallenge directory found"
     fi
     
-    if [ ! -f "$CONTAINER_PATH" ]; then
-        echo "!) Container not found: $CONTAINER_PATH"
-        issues=$((issues + 1))
-    fi
-    
-    if [ ! -f "$DEFAULT_DATASET" ]; then
-        echo "!) Default dataset not found: $DEFAULT_DATASET"
-        issues=$((issues + 1))
-    fi
-    
+    # Check enhanced wrapper
     if [ ! -f "$ENHANCED_WRAPPER" ]; then
-        echo "!) Enhanced wrapper not found: $ENHANCED_WRAPPER"
-        echo "   Please save the enhanced wrapper script as: $ENHANCED_WRAPPER"
+        log_error "Enhanced wrapper not found: $ENHANCED_WRAPPER"
+        log_error "Please save the enhanced wrapper script as: $ENHANCED_WRAPPER"
         issues=$((issues + 1))
+    else
+        log_info "Enhanced wrapper found"
     fi
     
-    # Check commands
-    if ! command -v apptainer &> /dev/null; then
-        echo "!) apptainer command not found"
-        issues=$((issues + 1))
-    fi
-    
+    # Check basic commands
     if ! command -v python3 &> /dev/null; then
-        echo "!) python3 command not found"
+        log_error "python3 command not found"
         issues=$((issues + 1))
+    else
+        log_info "Python3 available"
     fi
     
-    # Check system resources
-    local mem_gb=$(free -g | awk '/^Mem:/{print $2}')
-    if [ "$mem_gb" -lt 16 ]; then
-        echo "i) Available RAM: ${mem_gb}GB (recommended: 16GB+)"
+    return $issues
+}
+
+# Check experiment prerequisites (for train/evaluate tasks)
+check_experiment_prerequisites() {
+    log_section "PREREQUISITES CHECK"
+    
+    # First check common prerequisites
+    check_common_prerequisites
+    local issues=$?
+    
+    log_subsection "Experiment Prerequisites"
+    
+    # Check container
+    if [ ! -f "$CONTAINER_PATH" ]; then
+        log_error "Container not found: $CONTAINER_PATH"
+        issues=$((issues + 1))
     else
-        echo "v) Available RAM: ${mem_gb}GB"
+        log_info "Container found: $CONTAINER_PATH"
     fi
     
-    local cpu_cores=$(nproc)
-    echo "i) CPU cores: $cpu_cores"
-    
-    # Check GPU availability
-    if command -v nvidia-smi &> /dev/null; then
-        echo "v) NVIDIA GPU detected:"
-        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
+    # Check apptainer command
+    if ! command -v apptainer &> /dev/null; then
+        log_error "apptainer command not found"
+        issues=$((issues + 1))
     else
-        echo "i) No NVIDIA GPU detected (CPU-only mode)"
+        log_info "Apptainer available: $(apptainer --version)"
     fi
     
     if [ $issues -eq 0 ]; then
-        echo -e "V) All prerequisites satisfied!\n"
+        log_info "All prerequisites satisfied"
         return 0
     else
-        echo -e "!!) Found $issues issues. Please resolve them before proceeding.\n"
+        log_error "Found $issues issues. Please resolve them before proceeding"
         return 1
     fi
 }
 
 show_optimization_tips() {
-    echo ""
-    echo "i) OPTIMIZATION TIPS (optional - set manually if desired):"
-    echo "   For better CPU performance:"
-    echo "     export OMP_NUM_THREADS=$(nproc)"
-    echo ""
-    echo "   For less TensorFlow logging:"
-    echo "     export TF_CPP_MIN_LOG_LEVEL=2"
-    echo ""
-    echo "   For oneDNN optimizations:"
-    echo "     export TF_ENABLE_ONEDNN_OPTS=1"
-    echo ""
-    echo "   To set all at once:"
-    echo "     export OMP_NUM_THREADS=$(nproc) TF_CPP_MIN_LOG_LEVEL=2 TF_ENABLE_ONEDNN_OPTS=1"
-    echo ""
+    log_section "OPTIMIZATION TIPS"
+    log_info "Optional environment variables for better performance:"
+    log_info "  For CPU optimization:"
+    log_info "    export OMP_NUM_THREADS=$(nproc)"
+    log_info "  For TensorFlow logging:"
+    log_info "    export TF_CPP_MIN_LOG_LEVEL=2"
+    log_info "  For oneDNN optimizations:"
+    log_info "    export TF_ENABLE_ONEDNN_OPTS=1"
+    log_info "  Set all at once:"
+    log_info "    export OMP_NUM_THREADS=$(nproc) TF_CPP_MIN_LOG_LEVEL=2 TF_ENABLE_ONEDNN_OPTS=1"
 }
 
 setup_environment() {
-    echo "--> Setting up environment..."
+    log_section "ENVIRONMENT SETUP"
     
     # Create directories
     mkdir -p "$RESULTS_DIR"/{monitoring,analysis}
+    log_info "Created results directories"
     
     # Check environment variables without modifying them
-    echo "   Environment check:"
-    echo "    - OMP_NUM_THREADS: ${OMP_NUM_THREADS:-'not set (will auto-detect)'}"
-    echo "    - Available CPU cores: $(nproc)"
+    log_subsection "Environment Variables"
+    log_info "OMP_NUM_THREADS: ${OMP_NUM_THREADS:-'not set (will auto-detect)'}"
+    log_info "Available CPU cores: $(nproc)"
     
     if [ -z "$OMP_NUM_THREADS" ]; then
-        echo "i) Tip: You can set OMP_NUM_THREADS=$(nproc) for optimal CPU usage"
+        log_info "Tip: You can set OMP_NUM_THREADS=$(nproc) for optimal CPU usage"
     fi
     
-    # Show TensorFlow environment (without modifying)
-    echo "    - TF_CPP_MIN_LOG_LEVEL: ${TF_CPP_MIN_LOG_LEVEL:-'not set (default: 0)'}"
-    echo "    - TF_ENABLE_ONEDNN_OPTS: ${TF_ENABLE_ONEDNN_OPTS:-'not set (default: auto)'}"
+    log_info "TF_CPP_MIN_LOG_LEVEL: ${TF_CPP_MIN_LOG_LEVEL:-'not set (default: 0)'}"
+    log_info "TF_ENABLE_ONEDNN_OPTS: ${TF_ENABLE_ONEDNN_OPTS:-'not set (default: auto)'}"
     
-    echo "V) Environment setup complete (no modifications made)"
+    log_info "Environment setup complete"
+}
+
+# Show experiment summary after completion
+show_experiment_summary() {
+    local exp_dir="$1"
+    local exit_code="$2"
+    
+    log_section "EXPERIMENT SUMMARY"
+    
+    if [ "$exit_code" -eq 0 ]; then
+        log_info "Experiment completed successfully"
+    else
+        log_error "Experiment failed with exit code: $exit_code"
+        case $exit_code in
+            130) log_info "Cause: Interrupted by user" ;;
+            135) log_info "Cause: Bus error - likely container/memory issue" ;;
+            *) log_info "Cause: Check logs in $exp_dir/logs/ for details" ;;
+        esac
+    fi
+    
+    if [ -d "$exp_dir" ]; then
+        log_subsection "Generated Files"
+        
+        # Count different types of files
+        local csv_count=$(find "$exp_dir" -name "*.csv" 2>/dev/null | wc -l)
+        local log_count=$(find "$exp_dir" -name "*.log" 2>/dev/null | wc -l)
+        local json_count=$(find "$exp_dir" -name "*.json" 2>/dev/null | wc -l)
+        
+        log_info "Data files generated:"
+        log_info "  CSV files: $csv_count"
+        log_info "  Log files: $log_count"
+        log_info "  JSON metadata: $json_count"
+        
+        # Check monitoring status
+        if [ -d "$exp_dir/system_monitoring" ]; then
+            log_info "System monitoring: Data collected"
+        fi
+        
+        if [ -d "$exp_dir/process_monitoring" ]; then
+            log_info "Process monitoring: Data collected"
+        fi
+        
+        if [ -d "$exp_dir/gpu_monitoring" ]; then
+            log_info "GPU monitoring: Data collected"
+        fi
+        
+        log_info "Full results directory: $exp_dir"
+        
+        # Show disk usage
+        local size=$(du -sh "$exp_dir" 2>/dev/null | cut -f1)
+        log_info "Total size: ${size:-'unknown'}"
+    else
+        log_warn "Results directory not found: $exp_dir"
+    fi
 }
 
 run_experiment() {
@@ -196,114 +417,177 @@ run_experiment() {
     local loading_args=${4:-""}
     local max_iter=${5:-5000}
 
+    log_section "EXPERIMENT EXECUTION"
+
     # Setting variable about version
     export APPTAINERENV_APPTAINER_VERSION=$(apptainer --version | cut -d' ' -f3)
     
-    echo "--> Starting $task experiment"
-    echo "      - Dataset: $dataset"
-    echo "      - Config String: $config_string"
-    echo "      - Loading Args: ${loading_args:-'(none)'}"
-    echo "      - Max iterations: $max_iter"
+    log_info "Task: $task"
+    log_info "Dataset: $dataset"
+    log_info "Configuration: $config_string"
+    log_info "Loading args: ${loading_args:-'(none)'}"
+    log_info "Max iterations: $max_iter"
     
     # Check if we're in a SLURM environment
     if [ ! -z "$SLURM_JOB_ID" ]; then
-        echo "i) Running on SLURM node: $(hostname)"
-        echo "      SLURM Job ID: $SLURM_JOB_ID"
+        log_info "SLURM environment detected"
+        log_info "Node: $(hostname)"
+        log_info "Job ID: $SLURM_JOB_ID"
     fi
     
     # Enter container and run enhanced wrapper
     if [ "$USE_CONTAINER" = "true" ]; then
-        echo "📦 Using container: $CONTAINER_PATH"
-        apptainer exec "$CONTAINER_PATH" bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter"
+        log_info "Using container: $CONTAINER_PATH"
+        setsid apptainer exec "$CONTAINER_PATH" bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter" &
+        APPTAINER_PID=$!
+
+        log_info "Container process started (PID: $APPTAINER_PID)"
+
+        # Wait for completion
+        wait $APPTAINER_PID
+        local exit_code=$?
+
+        # Clear PID
+        unset APPTAINER_PID
+
+        local exp_dir=$(find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+
+        show_experiment_summary "$exp_dir" "$exit_code"
+
+        return $exit_code
     else
-        echo "🔧 Running without container (not recommended)"
+        log_warn "Running without container (not recommended)"
         bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter"
+        local exit_code=$?
+
+        local exp_dir=$(find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+        
+        show_experiment_summary "$exp_dir" "$exit_code"
+        return $exit_code
     fi
 }
 
 list_experiments() {
-    echo "📋 Available experiments:"
-    echo ""
+    log_section "AVAILABLE EXPERIMENTS"
     
     if [ ! -d "$RESULTS_DIR/monitoring" ]; then
-        echo "No experiments found in $RESULTS_DIR/monitoring"
+        log_info "No experiments directory found"
         return 0
     fi
     
     local count=0
+    local experiments=()
+    
+    # Collect and sort experiments
     for exp_dir in "$RESULTS_DIR/monitoring"/exp_*; do
         if [ -d "$exp_dir" ]; then
-            local exp_id=$(basename "$exp_dir")
-            local metadata_file="$exp_dir/metadata/experiment_metadata.json"
-            local summary_file="$exp_dir/metadata/execution_summary.json"
-            
-            echo "🔬 $exp_id"
-            
-            if [ -f "$metadata_file" ]; then
-                local task=$(python3 -c "import json; print(json.load(open('$metadata_file')).get('task', 'unknown'))" 2>/dev/null || echo "unknown")
-                local start_time=$(python3 -c "import json; print(json.load(open('$metadata_file')).get('start_time', 'unknown'))" 2>/dev/null || echo "unknown")
-                echo "   Task: $task"
-                echo "   Started: $start_time"
-            fi
-            
-            if [ -f "$summary_file" ]; then
-                local duration=$(python3 -c "import json; print(json.load(open('$summary_file')).get('execution_summary', {}).get('duration_formatted', 'unknown'))" 2>/dev/null || echo "unknown")
-                echo "   Duration: $duration"
-            fi
-            
-            echo "   Path: $exp_dir"
-            echo ""
-            count=$((count + 1))
+            experiments+=("$(basename "$exp_dir")")
         fi
     done
     
-    echo "Total experiments: $count"
+    if [ ${#experiments[@]} -eq 0 ]; then
+        log_info "No experiments found"
+        return 0
+    fi
+    
+    # Sort experiments (bash built-in sort)
+    IFS=$'\n' experiments=($(sort <<<"${experiments[*]}"))
+    unset IFS
+    
+    # Display each experiment
+    for exp_id in "${experiments[@]}"; do
+        local exp_path="$RESULTS_DIR/monitoring/$exp_id"
+        log_info "Experiment: $exp_id"
+        
+        # Parse metadata with bash (avoiding Python)
+        local metadata_file="$exp_path/metadata/experiment_metadata.json"
+        local summary_file="$exp_path/metadata/execution_summary.json"
+        
+        if [ -f "$metadata_file" ]; then
+            # Extract task and config with grep/sed
+            local task=$(grep '"task"' "$metadata_file" 2>/dev/null | sed 's/.*"task": *"\([^"]*\)".*/\1/' || echo "unknown")
+            local config=$(grep '"config_string"' "$metadata_file" 2>/dev/null | sed 's/.*"config_string": *"\([^"]*\)".*/\1/' || echo "unknown")
+            local start_time=$(grep '"start_time"' "$metadata_file" 2>/dev/null | sed 's/.*"start_time": *"\([^"]*\)".*/\1/' || echo "unknown")
+            
+            log_info "  Task: $task"
+            log_info "  Config: $config"
+            log_info "  Started: $start_time"
+        fi
+        
+        if [ -f "$summary_file" ]; then
+            local duration=$(grep '"duration_formatted"' "$summary_file" 2>/dev/null | sed 's/.*"duration_formatted": *"\([^"]*\)".*/\1/' || echo "unknown")
+            log_info "  Duration: $duration"
+        fi
+        
+        log_info "  Path: $exp_path"
+        echo ""
+        count=$((count + 1))
+    done
+    
+    log_info "Total experiments: $count"
 }
 
 analyze_experiment() {
     local exp_id=$1
     
+    log_section "EXPERIMENT ANALYSIS"
+    
     if [ -z "$exp_id" ]; then
-        echo "❌ Please specify experiment ID"
-        echo "Use '$0 list' to see available experiments"
+        log_error "No experiment ID specified"
+        log_info "Usage: $0 analyze <experiment_id>"
+        log_info "Use '$0 list' to see available experiments"
         return 1
     fi
     
     local exp_dir="$RESULTS_DIR/monitoring/$exp_id"
     
     if [ ! -d "$exp_dir" ]; then
-        echo "❌ Experiment not found: $exp_dir"
+        log_error "Experiment not found: $exp_dir"
         return 1
     fi
     
-    echo "📊 Analyzing experiment: $exp_id"
+    log_info "Analyzing experiment: $exp_id"
     
     # Check if analysis script exists
     local analysis_script="$BOLOGAN_HOME/scripts/analyze_monitoring.py"
     
     if [ ! -f "$analysis_script" ]; then
-        echo "❌ Analysis script not found: $analysis_script"
-        echo "   Please save the analysis script as: $analysis_script"
+        log_error "Analysis script not found: $analysis_script"
+        log_info "Please save the analysis script as: $analysis_script"
         return 1
     fi
     
     # Run analysis
+    log_info "Running analysis script..."
     python3 "$analysis_script" "$exp_dir" --plots --report
     
-    echo "✅ Analysis complete for $exp_id"
+    log_info "Analysis complete for $exp_id"
 }
 
 clean_old_results() {
     local days=${1:-7}
     
-    echo "🧹 Cleaning results older than $days days..."
+    log_section "RESULTS CLEANUP"
+    log_info "Cleaning results older than $days days..."
     
     if [ -d "$RESULTS_DIR/monitoring" ]; then
-        find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -mtime +$days -exec rm -rf {} \; 2>/dev/null || true
+        local count=$(find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -mtime +$days | wc -l)
+        if [ "$count" -gt 0 ]; then
+            log_info "Found $count experiments to remove"
+            find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -mtime +$days -exec rm -rf {} \; 2>/dev/null || true
+            log_info "Removed $count old experiments"
+        else
+            log_info "No old experiments found to remove"
+        fi
+    else
+        log_info "No monitoring directory found"
     fi
     
-    echo "✅ Cleanup complete"
+    log_info "Cleanup complete"
 }
+
+# Set up signal trap
+trap cleanup_runner INT TERM
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -387,7 +671,7 @@ done
 
 # Check if command was provided
 if [ -z "$COMMAND" ]; then
-    echo "❌ No command specified"
+    log_error "No command specified"
     show_help
     exit 1
 fi
@@ -395,40 +679,46 @@ fi
 # Execute command
 case "$COMMAND" in
     setup)
-        check_prerequisites
+        check_common_prerequisites || exit 1
         setup_environment
         show_optimization_tips
         ;;
     train)
-        check_prerequisites || exit 1
-        
+        check_experiment_prerequisites || exit 1
+        validate_arguments "$COMMAND" || exit 1        
         run_experiment "train" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS" "$MAX_ITER"
         ;;
     evaluate)
-        check_prerequisites || exit 1
+        check_experiment_prerequisites || exit 1
+        validate_arguments "$COMMAND" || exit 1
         run_experiment "evaluate" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS"
         ;;
     full)
-        check_prerequisites || exit 1
+        check_experiment_prerequisites || exit 1
+        validate_arguments "$COMMAND" || exit 1
         
-        echo "🔄 Running full training + evaluation cycle"
+        log_section "FULL TRAINING + EVALUATION CYCLE"
         
         run_experiment "train" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS" "$MAX_ITER"
-        
-        echo ""
-        echo "🔄 Starting evaluation phase..."
-        sleep 2
-        
-        run_experiment "evaluate" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS"
+        local train_exit=$?
+
+        if [ $train_exit -eq 0 ]; then
+            log_info "Training completed successfully, starting evaluation"
+            sleep 2
+            run_experiment "evaluate" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS"
+        else
+            log_error "Training failed with exit code $train_exit, skipping evaluation"
+            exit $train_exit
+        fi
         ;;
     list)
         list_experiments
         ;;
     analyze)
+        check_common_prerequisites || exit 1
         if [ -z "$EXP_ID" ]; then
-            echo "❌ Please specify experiment ID to analyze"
-            echo "Usage: $0 analyze <experiment_id>"
-            echo ""
+            log_error "No experiment ID specified for analysis"
+            log_info "Usage: $0 analyze <experiment_id>"
             list_experiments
             exit 1
         fi
@@ -438,10 +728,10 @@ case "$COMMAND" in
         clean_old_results 7
         ;;
     *)
-        echo "❌ Unknown command: $COMMAND"
+        log_error "Unknown command: $COMMAND"
         show_help
         exit 1
         ;;
 esac
 
-echo "--> Operation completed successfully!"
+log_info "Operation completed successfully!"
