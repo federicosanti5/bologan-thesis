@@ -603,28 +603,27 @@ start_monitoring() {
         add_monitoring_pid $! "perf_power"
         log_info "energy: perf power events at ${interval}ms interval"
     elif test_rapl_access; then
-        {
-            declare -A rapl_domains
-            declare -a rapl_order
-            
-            # Scan all intel-rapl domains
-            for rapl_path in /sys/class/powercap/intel-rapl:*; do
-                if [[ -d "$rapl_path" && -f "$rapl_path/name" && -f "$rapl_path/energy_uj" ]]; then
-                    if cat "$rapl_path/energy_uj" >/dev/null 2>&1; then
-                        domain_name=$(cat "$rapl_path/name" 2>/dev/null || echo "unknown")
-                        domain_id=$(basename "$rapl_path")
-                        rapl_domains["$domain_id"]="$domain_name"
-                        rapl_order+=("$domain_id")
-                        echo "# Discovered readable RAPL domain: $domain_id -> $domain_name ($rapl_path)" >&2
-                    fi
-                fi
-            done
 
-            if [[ ${#rapl_order[@]} -eq 0 ]]; then
-                echo "# No readable RAPL domains found after testing" >&2
-                echo "timestamp_ms,error"
-                echo "$(date +%s%3N),no_readable_rapl_domains"
-            else
+        declare -A rapl_domains
+        declare -a rapl_order
+        
+        # Scan all intel-rapl domains
+        for rapl_path in /sys/class/powercap/intel-rapl:*; do
+            if [[ -d "$rapl_path" && -f "$rapl_path/name" && -f "$rapl_path/energy_uj" ]]; then
+                if cat "$rapl_path/energy_uj" >/dev/null 2>&1; then
+                    domain_name=$(cat "$rapl_path/name" 2>/dev/null || echo "unknown")
+                    domain_id=$(basename "$rapl_path")
+                    rapl_domains["$domain_id"]="$domain_name"
+                    rapl_order+=("$domain_id")
+                    echo "# Discovered readable RAPL domain: $domain_id -> $domain_name ($rapl_path)" >&2
+                fi
+            fi
+        done
+
+        if [[ ${#rapl_order[@]} -eq 0 ]]; then
+            elog_warn "energy: no readable RAPL domains found"
+        else
+            {
                 header="timestamp_ms"
                 for domain_id in "${rapl_order[@]}"; do
                     domain_name="${rapl_domains[$domain_id]}"
@@ -652,11 +651,12 @@ start_monitoring() {
                     echo "$row"
                     sleep $ENERGY_SAMPLE_SECS  # higher granularity for energy monitoring
                 done
-            fi
-        } > "${sys_prefix}_energy_rapl.csv" 2> "${sys_prefix_log}_energy_rapl.log" &
+            } > "${sys_prefix}_energy_rapl.csv" 2> "${sys_prefix_log}_energy_rapl.log" &
 
-        add_monitoring_pid $! "rapl"
-        log_info "energy: RAPL ${#rapl_order[@]} domains at ${ENERGY_SAMPLE_SECS}s interval"
+            add_monitoring_pid $! "rapl"
+            log_info "energy: RAPL ${#rapl_order[@]} domains at ${ENERGY_SAMPLE_SECS}s interval"
+
+        fi
     else
         log_warn "energy: no monitoring source available (turbostat/perf/rapl)"
     fi
