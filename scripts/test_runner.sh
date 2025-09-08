@@ -9,7 +9,40 @@ set -e  # Exit on any error
 # CONFIGURATION
 # =============================================================================
 
-BOLOGAN_HOME="/home/saint/Documents/UNIBO/tesi"
+# Load configuration from file
+load_config() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local config_file="${script_dir}/config.sh"
+    
+    if [[ ! -f "$config_file" ]]; then
+        echo "ERROR: Configuration file not found: $config_file"
+        echo "Please create $config_file with the following content:"
+        echo "BOLOGAN_HOME=\"/path/to/your/project\""
+        exit 1
+    fi
+    
+    # Source the configuration file
+    source "$config_file"
+    
+    # Validate BOLOGAN_HOME is set
+    if [[ -z "$BOLOGAN_HOME" ]]; then
+        echo "ERROR: BOLOGAN_HOME not defined in $config_file"
+        echo "Please add: BOLOGAN_HOME=\"/path/to/your/project\""
+        exit 1
+    fi
+    
+    # Validate the path exists
+    if [[ ! -d "$BOLOGAN_HOME" ]]; then
+        echo "ERROR: BOLOGAN_HOME directory does not exist: $BOLOGAN_HOME"
+        echo "Please check the path in $config_file"
+        exit 1
+    fi
+}
+
+# Load configuration
+load_config
+
+# Derive other paths from BOLOGAN_HOME
 FASTCALO_DIR="${BOLOGAN_HOME}/FastCaloChallenge"
 CONTAINER_PATH="${BOLOGAN_HOME}/containers/FastCaloGANtainer_Plus_Mntr.sif"
 RESULTS_DIR="${BOLOGAN_HOME}/results"

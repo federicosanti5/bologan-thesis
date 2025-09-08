@@ -8,7 +8,7 @@
 # =============================================================================
 
 # Directories
-BOLOGAN_HOME="/home/saint/Documents/UNIBO/tesi"
+source ./config.sh
 FASTCALO_DIR="${BOLOGAN_HOME}/FastCaloChallenge"
 RESULTS_DIR="${BOLOGAN_HOME}/results"
 MONITORING_DIR="${RESULTS_DIR}/monitoring"
