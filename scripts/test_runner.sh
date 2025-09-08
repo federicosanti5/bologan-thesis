@@ -44,7 +44,7 @@ load_config
 
 # Derive other paths from BOLOGAN_HOME
 FASTCALO_DIR="${BOLOGAN_HOME}/FastCaloChallenge"
-CONTAINER_PATH="${BOLOGAN_HOME}/containers/FastCaloGANtainer_Plus_Mntr.sif"
+CONTAINER_PATH="${BOLOGAN_HOME}/containers/GANtainer_Mntr.sif"
 RESULTS_DIR="${BOLOGAN_HOME}/results"
 ENHANCED_WRAPPER="${BOLOGAN_HOME}/scripts/enhanced_wrapper.sh"
 
