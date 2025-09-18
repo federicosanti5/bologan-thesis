@@ -301,8 +301,8 @@ start_monitoring() {
     
     # CPU and Memory monitoring (check if commands exist)
     if command -v vmstat &> /dev/null; then
-        setsid env LC_ALL=C stdbuf -oL -eL vmstat -n $SYSTEM_SAMPLE_SECS \
-        | awk -v TS_FMT="+%Y-%m-%dT%H:%M:%S%z" '
+        setsid sh -c "env LC_ALL=C stdbuf -oL -eL vmstat -n $SYSTEM_SAMPLE_SECS \
+        | awk -v TS_FMT='+%Y-%m-%dT%H:%M:%S%z' '
             BEGIN { have_header=0; skip_first=0 }
             # skip decorative row "procs ---memory--- ... ---cpu---"
             /^procs/ { next }
@@ -329,9 +329,9 @@ start_monitoring() {
                 print ts "," line
                 fflush()
             }
-        ' > "${sys_prefix}_vmstat.csv" 2>&1 &
+        ' > \"${sys_prefix}_vmstat.csv\" 2>&1" &
         
-        local awk_pid = $!
+        local awk_pid=$!
         local pgid=$(ps -o pgid= -p "$awk_pid" | tr -d '[:space:]')
 
         add_monitoring_pid $pgid "vmstat"
