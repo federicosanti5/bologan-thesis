@@ -301,14 +301,20 @@ start_monitoring() {
     
     # CPU and Memory monitoring (check if commands exist)
     if command -v vmstat &> /dev/null; then
-        setsid sh -c "env LC_ALL=C stdbuf -oL -eL vmstat -n $SYSTEM_SAMPLE_SECS \
-        | awk -v TS_FMT='+%Y-%m-%dT%H:%M:%S%z' '
+        SYSTEM_SAMPLE_SECS="$SYSTEM_SAMPLE_SECS" sys_prefix="$sys_prefix" \
+        setsid sh -c '
+            TS_FMT="+%Y-%m-%dT%H:%M:%S%z"
+
+            env LC_ALL=C stdbuf -oL -eL vmstat -n "$SYSTEM_SAMPLE_SECS" \
+            | awk -v TS_FMT="$TS_FMT" '\''
             BEGIN { have_header=0; skip_first=0 }
-            # skip decorative row "procs ---memory--- ... ---cpu---"
+
+            # salta riga decorativa
             /^procs/ { next }
-            # capture column headers (r b swpd free ... st)
+
+            # header colonne (r b swpd free ... st)
             /^[[:space:]]*r[[:space:]]+b[[:space:]]+swpd/ {
-                if (!have_header) {
+                if (have_header==0) {
                     line=$0
                     sub(/^[[:space:]]+/, "", line)
                     gsub(/[[:space:]]+/, ",", line)
@@ -317,9 +323,10 @@ start_monitoring() {
                 }
                 next
             }
-            # data rows
+
+            # righe dati
             /^[[:space:]]*[0-9]/ {
-                if (!skip_first) { skip_first=1; next }  # skip first sample (averages since boot)
+                if (skip_first==0) { skip_first=1; next }  # salta primo sample
                 cmd="date " TS_FMT
                 cmd | getline ts
                 close(cmd)
@@ -329,12 +336,11 @@ start_monitoring() {
                 print ts "," line
                 fflush()
             }
-        ' > \"${sys_prefix}_vmstat.csv\" 2>&1" &
+            '\'' > "${sys_prefix}_vmstat.csv" 2>&1
+        ' & 
         
-        local awk_pid=$!
-        local pgid=$(ps -o pgid= -p "$awk_pid" | tr -d '[:space:]')
-
-        add_monitoring_pid $pgid "vmstat"
+        local vmstat_pid=$!
+        add_monitoring_pid $vmstat_pid "vmstat"
         log_info "vmstat: enabled (1s interval, CSV with timestamp from vmstat header)"
     else
         log_warn "vmstat: not available - CPU monitoring limited"
@@ -344,71 +350,76 @@ start_monitoring() {
     if command -v iostat &> /dev/null; then
 
         # --- CPU CSV (iostat -c -y 1) ---
-        setsid env LC_ALL=C stdbuf -oL -eL iostat -c -y "$SYSTEM_SAMPLE_SECS" \
-        | awk '
-            BEGIN { printed_hdr=0; state=0 }
-            /^Linux / || /^$/ { next }                 # banner and empty lines
-            /^avg-cpu:/ { state=1; next }              # start CPU report
+        SYSTEM_SAMPLE_SECS="$SYSTEM_SAMPLE_SECS" sys_prefix="$sys_prefix" \
+        setsid sh -c '
+            env LC_ALL=C stdbuf -oL -eL iostat -c -y "$SYSTEM_SAMPLE_SECS" \
+            | awk '\''
+                BEGIN { printed_hdr=0; state=0 }
+                /^Linux / || /^$/ { next }                 # banner e righe vuote
+                /^avg-cpu:/ { state=1; next }              # inizio report CPU
 
-            state==1 {
-                gsub(/^[ \t]+|[ \t]+$/,"")
-                if ($0 ~ /^%user[ \t]+%nice[ \t]+%system[ \t]+%iowait[ \t]+%steal[ \t]+%idle$/) {
-                    if (!printed_hdr) { gsub(/[ \t]+/, ","); print "timestamp," $0; printed_hdr=1 }
-                    state=2; next
-                } else {
-                    if (!printed_hdr) { print "timestamp,%user,%nice,%system,%iowait,%steal,%idle"; printed_hdr=1 }
+                state==1 {
+                    gsub(/^[ \t]+|[ \t]+$/,"")
+                    if ($0 ~ /^%user[ \t]+%nice[ \t]+%system[ \t]+%iowait[ \t]+%steal[ \t]+%idle$/) {
+                        if (!printed_hdr) { gsub(/[ \t]+/, ","); print "timestamp," $0; printed_hdr=1 }
+                        state=2; next
+                    } else {
+                        if (!printed_hdr) { print "timestamp,%user,%nice,%system,%iowait,%steal,%idle"; printed_hdr=1 }
+                        ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())
+                        gsub(/[ \t]+/, ",")
+                        print ts "," $0
+                        fflush()
+                        state=0; next
+                    }
+                }
+
+                state==2 {
                     ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())
+                    gsub(/^[ \t]+|[ \t]+$/,"")
                     gsub(/[ \t]+/, ",")
                     print ts "," $0
                     fflush()
                     state=0; next
                 }
-            }
+            '\'' >> "${sys_prefix}_iostat_cpu.csv" 2>&1
+        ' &
 
-            state==2 {
-                ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())
-                gsub(/^[ \t]+|[ \t]+$/,"")
-                gsub(/[ \t]+/, ",")
-                print ts "," $0
-                fflush()
-                state=0; next
-            }
-        ' >> "${sys_prefix}_iostat_cpu.csv" &
-
-        local awk_pid=$!
-        local pgid=$(ps -o pgid= -p "$awk_pid" | tr -d '[:space:]')
-        add_monitoring_pid $pgid "iostat_cpu"
+        local iostat_cpu_pid=$!
+        add_monitoring_pid $iostat_cpu_pid "iostat_cpu"
 
         # --- DEVICE CSV (iostat -xd -y 1 -k) ---
-        setsid env LC_ALL=C stdbuf -oL -eL iostat -xd -y -k "$SYSTEM_SAMPLE_SECS" \
-        | awk '
-            BEGIN { have_h=0; in_tbl=0; ts="" }
-            /^Linux / { next }               # banner
-            /^$/ { in_tbl=0; next }          # end of table for this report
+        SYSTEM_SAMPLE_SECS="$SYSTEM_SAMPLE_SECS" sys_prefix="$sys_prefix" \
+        setsid sh -c '
+            env LC_ALL=C stdbuf -oL -eL iostat -xd -y -k "$SYSTEM_SAMPLE_SECS" \
+            | awk '\''
+                BEGIN { have_h=0; in_tbl=0; ts="" }
+                /^Linux / { next }               # banner
+                /^$/ { in_tbl=0; next }          # fine tabella del blocco corrente
 
-            # Device table header
-            /^Device:/ {
-                hdr=$0
-                sub(/^Device:[ \t]*/,"device,", hdr)
-                gsub(/[ \t]+/, ",", hdr)
-                if (!have_h) { print "timestamp," hdr; have_h=1 }
-                ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())  # same TS for all rows in this block
-                in_tbl=1; next
-            }
+                # header tabella Device (con o senza :, con eventuali spazi davanti)
+                /^[[:space:]]*Device[:[:space:]]/ {
+                    hdr=$0
+                    gsub(/^[ \t]+/, "", hdr)              # trim left
+                    gsub(/[ \t]+/, ",", hdr)              # spazi -> virgole
+                    sub(/^Device,/, "device,", hdr)       # minuscolo per la prima colonna
+                    if (!have_h) { print "timestamp," hdr; have_h=1 }
+                    ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())  # TS unico per il blocco
+                    in_tbl=1; next
+                }
 
-            # Device rows (sda, dm-0, dm-1, ...)
-            in_tbl {
-                line=$0
-                gsub(/^[ \t]+|[ \t]+$/,"", line)
-                gsub(/[ \t]+/, ",", line)
-                print ts "," line
-                fflush()
-            }
-        ' >> "${sys_prefix}_iostat_dev.csv" &
+                # righe dei device
+                in_tbl {
+                    line=$0
+                    gsub(/^[ \t]+|[ \t]+$/,"", line)      # trim
+                    gsub(/[ \t]+/, ",", line)             # spazi -> virgole
+                    print ts "," line
+                    fflush()
+                }
+            '\'' >> "${sys_prefix}_iostat_dev.csv" 2>&1
+        ' &
 
-        local awk_pid=$!
-        local pgid=$(ps -o pgid= -p "$awk_pid" | tr -d '[:space:]')
-        add_monitoring_pid $pgid "iostat_dev"
+        local iostat_dev_pid=$!
+        add_monitoring_pid $iostat_dev_pid "iostat_dev"
 
         log_info "iostat: enabled (${SYSTEM_SAMPLE_SECS}s; CPU -> ${sys_prefix}_iostat_cpu.csv, DEV -> ${sys_prefix}_iostat_dev.csv)"
     else
@@ -416,48 +427,50 @@ start_monitoring() {
     fi
     
     # Free monitoring
-    setsid env LC_ALL=C stdbuf -oL -eL free -m -s "$SYSTEM_SAMPLE_SECS" \
-    | awk -v MEM="${sys_prefix}_free_mem.csv" -v SWP="${sys_prefix}_free_swap.csv" '
-        BEGIN { mem_hdr=0; swp_hdr=0; ts="" }
+    SYSTEM_SAMPLE_SECS="$SYSTEM_SAMPLE_SECS" sys_prefix="$sys_prefix" \
+    setsid sh -c '
+        env LC_ALL=C stdbuf -oL -eL free -m -s "$SYSTEM_SAMPLE_SECS" \
+        | awk -v MEM="${sys_prefix}_free_mem.csv" -v SWP="${sys_prefix}_free_swap.csv" '\''
+            BEGIN { mem_hdr=0; swp_hdr=0; ts="" }
 
-        # Header row (columns)
-        /^[[:space:]]+total[[:space:]]+used[[:space:]]+free[[:space:]]+shared[[:space:]]+buff\/cache[[:space:]]+available/ {
-            line=$0
-            gsub(/^[[:space:]]+/, "", line)
-            gsub(/[[:space:]]+/, ",", line)              # "total,used,free,shared,buff/cache,available"
-            if (!mem_hdr) { print "timestamp," line > MEM; mem_hdr=1; fflush(MEM) }
-            if (!swp_hdr) { print "timestamp,total,used,free" > SWP; swp_hdr=1; fflush(SWP) }
-            ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())  # same TS for Mem and Swap in this block
-            next
-        }
+            # riga header colonne
+            /^[[:space:]]*total[[:space:]]+used[[:space:]]+free[[:space:]]+shared[[:space:]]+buff\/cache[[:space:]]+available/ {
+                line=$0
+                gsub(/^[[:space:]]+/, "", line)
+                gsub(/[[:space:]]+/, ",", line)  # "total,used,free,shared,buff/cache,available"
+                if (!mem_hdr) { print "timestamp," line > MEM; mem_hdr=1; fflush(MEM) }
+                if (!swp_hdr) { print "timestamp,total,used,free" > SWP; swp_hdr=1; fflush(SWP) }
+                ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())  # stesso TS per Mem e Swap in questo blocco
+                next
+            }
 
-        # Mem: row
-        /^Mem:/ {
-            line=$0
-            sub(/^Mem:[[:space:]]+/, "", line)
-            gsub(/[[:space:]]+/, ",", line)              # values in MiB
-            print ts "," line >> MEM
-            fflush(MEM)
-            next
-        }
+            # riga Mem:
+            /^Mem:/ {
+                line=$0
+                sub(/^Mem:[[:space:]]+/, "", line)
+                gsub(/[[:space:]]+/, ",", line)  # valori in MiB
+                print ts "," line >> MEM
+                fflush(MEM)
+                next
+            }
 
-        # Swap: row
-        /^Swap:/ {
-            line=$0
-            sub(/^Swap:[[:space:]]+/, "", line)
-            gsub(/[[:space:]]+/, ",", line)
-            # Keep only first 3 fields (total,used,free)
-            n=split(line, a, ",")
-            out=a[1] "," a[2] "," a[3]
-            print ts "," out >> SWP
-            fflush(SWP)
-            next
-        }
+            # riga Swap:
+            /^Swap:/ {
+                line=$0
+                sub(/^Swap:[[:space:]]+/, "", line)
+                gsub(/[[:space:]]+/, ",", line)
+                # tieni solo i primi 3 campi (total,used,free)
+                n=split(line, a, ",")
+                out=a[1] "," a[2] "," a[3]
+                print ts "," out >> SWP
+                fflush(SWP)
+                next
+            }
+        '\''
     ' &
 
-    local awk_pid=$!
-    local pgid=$(ps -o pgid= -p "$awk_pid" | tr -d '[:space:]')
-    add_monitoring_pid $pgid "free"
+    local free_pid=$!
+    add_monitoring_pid $free_pid "free"
 
     log_info "free: enabled (${SYSTEM_SAMPLE_SECS}s interval, CSV -> ${sys_prefix}_free_mem.csv & ${sys_prefix}_free_swap.csv)"
 
