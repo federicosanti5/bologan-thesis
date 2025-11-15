@@ -641,7 +641,7 @@ start_monitoring() {
         done
 
         if [[ ${#rapl_order[@]} -eq 0 ]]; then
-            elog_warn "energy: no readable RAPL domains found"
+            log_warn "energy: no readable RAPL domains found"
         else
             {
                 header="timestamp_ms"

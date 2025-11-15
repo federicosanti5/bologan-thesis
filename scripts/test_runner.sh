@@ -197,11 +197,11 @@ cleanup_runner() {
                     rm -f "$latest_exp_dir/monitoring_active" 2>/dev/null || true
 
                     # Kill Python process first
-                    if [[ -f "$latest_exp_dir/python_pid.txt" ]]; then
-                        local python_pid=$(cat "$latest_exp_dir/python_pid.txt")
-                        if [[ -n "$python_pid" && "$python_pid" =~ ^[0-9]+$ ]] && kill -0 "$python_pid" 2>/dev/null; then
-                            log_info "Force killing Python process (PID: $python_pid)"
-                            kill -KILL "$python_pid" 2>/dev/null || true
+                    if [[ -f "$latest_exp_dir/python_pgid.txt" ]]; then
+                        local python_pgid=$(cat "$latest_exp_dir/python_pgid.txt")
+                        if [[ -n "$python_pgid" && "$python_pgid" =~ ^[0-9]+$ ]] && kill -0 "$python_pgid" 2>/dev/null; then
+                            log_info "Force killing Python process (PGID: $python_pgid)"
+                            kill -KILL "-$python_pgid" 2>/dev/null || true
                         fi
                     fi
                     
@@ -214,7 +214,7 @@ cleanup_runner() {
                     fi
                     
                     # Clean up files
-                    rm -f "$latest_exp_dir/python_pid.txt" 2>/dev/null || true
+                    rm -f "$latest_exp_dir/python_pgid.txt" 2>/dev/null || true
                     rm -f "$latest_exp_dir/monitoring_pids.txt" 2>/dev/null || true
                     rm -f "$latest_exp_dir/wrapper_pid.txt" 2>/dev/null || true
                 fi
