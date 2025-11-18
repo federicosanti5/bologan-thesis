@@ -1,0 +1,16 @@
+# BoloGAN Analysis Suite - Python Dependencies
+# Install with: pip3 install -r requirements.txt
+
+# Core scientific stack
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Statistical analysis
+scipy>=1.10.0
+
+# Optional: Progress bars for long analyses
+tqdm>=4.65.0

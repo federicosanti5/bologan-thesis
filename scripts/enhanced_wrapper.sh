@@ -303,10 +303,8 @@ start_monitoring() {
     if command -v vmstat &> /dev/null; then
         SYSTEM_SAMPLE_SECS="$SYSTEM_SAMPLE_SECS" sys_prefix="$sys_prefix" \
         setsid sh -c '
-            TS_FMT="+%Y-%m-%dT%H:%M:%S%z"
-
             env LC_ALL=C stdbuf -oL -eL vmstat -n "$SYSTEM_SAMPLE_SECS" \
-            | awk -v TS_FMT="$TS_FMT" '\''
+            | awk '\''
             BEGIN { have_header=0; skip_first=0 }
 
             # salta riga decorativa
@@ -327,7 +325,7 @@ start_monitoring() {
             # righe dati
             /^[[:space:]]*[0-9]/ {
                 if (skip_first==0) { skip_first=1; next }  # salta primo sample
-                cmd="date " TS_FMT
+                cmd="date +%s.%N"
                 cmd | getline ts
                 close(cmd)
                 line=$0
@@ -365,7 +363,9 @@ start_monitoring() {
                         state=2; next
                     } else {
                         if (!printed_hdr) { print "timestamp,%user,%nice,%system,%iowait,%steal,%idle"; printed_hdr=1 }
-                        ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())
+                        cmd="date +%s.%N"
+                        cmd | getline ts
+                        close(cmd)
                         gsub(/[ \t]+/, ",")
                         print ts "," $0
                         fflush()
@@ -374,7 +374,9 @@ start_monitoring() {
                 }
 
                 state==2 {
-                    ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())
+                    cmd="date +%s.%N"
+                    cmd | getline ts
+                    close(cmd)
                     gsub(/^[ \t]+|[ \t]+$/,"")
                     gsub(/[ \t]+/, ",")
                     print ts "," $0
@@ -403,7 +405,9 @@ start_monitoring() {
                     gsub(/[ \t]+/, ",", hdr)              # spazi -> virgole
                     sub(/^Device,/, "device,", hdr)       # minuscolo per la prima colonna
                     if (!have_h) { print "timestamp," hdr; have_h=1 }
-                    ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())  # TS unico per il blocco
+                    cmd="date +%s.%N"
+                    cmd | getline ts
+                    close(cmd)
                     in_tbl=1; next
                 }
 
@@ -440,7 +444,9 @@ start_monitoring() {
                 gsub(/[[:space:]]+/, ",", line)  # "total,used,free,shared,buff/cache,available"
                 if (!mem_hdr) { print "timestamp," line > MEM; mem_hdr=1; fflush(MEM) }
                 if (!swp_hdr) { print "timestamp,total,used,free" > SWP; swp_hdr=1; fflush(SWP) }
-                ts = strftime("%Y-%m-%dT%H:%M:%S%z", systime())  # stesso TS per Mem e Swap in questo blocco
+                cmd="date +%s.%N"
+                cmd | getline ts
+                close(cmd)
                 next
             }
 
@@ -509,8 +515,8 @@ start_monitoring() {
         if [[ $cpu_count -gt 0 ]]; then
             {
                 echo "# Discovered $cpu_count CPU cores for frequency monitoring" >&2
-                
-                header="timestamp_ms"
+
+                header="timestamp"
                 for ((i=0; i<cpu_count; i++)); do
                     header="${header},cpu${i}_mhz"
                 done
@@ -518,21 +524,21 @@ start_monitoring() {
                 
                 # Monitoring loop
                 while [[ -f "${EXPERIMENT_DIR}/monitoring_active" ]]; do
-                    timestamp_ms=$(date +%s%3N)
+                    timestamp=$(date +%s.%N)
                     freq_data=$(grep "cpu MHz" /proc/cpuinfo 2>/dev/null | awk '{print $4}' | tr '\n' ',')
-                    
+
                     if [[ -n "$freq_data" ]]; then
                         freq_data=${freq_data%,}
-                        echo "${timestamp_ms},${freq_data}"
+                        echo "${timestamp},${freq_data}"
                     else
                         # Fallback
-                        row="$timestamp_ms"
+                        row="$timestamp"
                         for ((i=0; i<cpu_count; i++)); do
                             row="${row},-1"
                         done
                         echo "$row"
                     fi
-                    
+
                     sleep $CPU_SAMPLE_SECS  # 2Hz sampling
                 done
 
@@ -572,17 +578,17 @@ start_monitoring() {
                 done
                     echo "# Found ${#thermal_zones[@]} thermal zones for monitoring" >&2
 
-                    header="timestamp_ms"
+                    header="timestamp"
                     for zone in "${thermal_zones[@]}"; do
                         header="${header},${zone}_milliC"
                     done
                     echo "$header"
-                    
+
                     # Monitoring loop
                     while [[ -f "${EXPERIMENT_DIR}/monitoring_active" ]]; do
-                        timestamp_ms=$(date +%s%3N)
-                        row="$timestamp_ms"
-                        
+                        timestamp=$(date +%s.%N)
+                        row="$timestamp"
+
                         # Read temperature from each thermal zone
                         for zone in "${thermal_zones[@]}"; do
                             thermal_path="/sys/class/thermal/$zone"
@@ -593,7 +599,7 @@ start_monitoring() {
                             fi
                             row="${row},${temp_millic}"
                         done
-                        
+
                         echo "$row"
                         sleep $CPU_SAMPLE_SECS  # 2Hz sampling
                     done
@@ -644,19 +650,19 @@ start_monitoring() {
             log_warn "energy: no readable RAPL domains found"
         else
             {
-                header="timestamp_ms"
+                header="timestamp"
                 for domain_id in "${rapl_order[@]}"; do
                     domain_name="${rapl_domains[$domain_id]}"
                     clean_name=$(echo "$domain_name" | tr ' -' '_' | tr -cd '[:alnum:]_')
                     header="${header},${domain_id}_${clean_name}_uj"
                 done
                 echo "$header"
-                
+
                 # Monitoring loop
                 while [[ -f "${EXPERIMENT_DIR}/monitoring_active" ]]; do
-                    timestamp_ms=$(date +%s%3N)
-                    row="$timestamp_ms"
-                    
+                    timestamp=$(date +%s.%N)
+                    row="$timestamp"
+
                     # Read all domains in discovered order
                     for domain_id in "${rapl_order[@]}"; do
                         rapl_path="/sys/class/powercap/$domain_id"
@@ -667,7 +673,7 @@ start_monitoring() {
                         fi
                         row="${row},${energy_uj}"
                     done
-                    
+
                     echo "$row"
                     sleep $ENERGY_SAMPLE_SECS  # higher granularity for energy monitoring
                 done
@@ -692,6 +698,52 @@ start_monitoring() {
         log_warn "GPU: nvidia-smi not available"
     fi
 
+    log_subsection "Self-Monitoring (Overhead Measurement)"
+
+    # Monitor the monitoring infrastructure itself to quantify overhead
+    if command -v pidstat &> /dev/null; then
+        local wrapper_pid=$(cat "${EXPERIMENT_DIR}/wrapper_pid.txt" 2>/dev/null || echo "")
+
+        if [[ -n "$wrapper_pid" && "$wrapper_pid" =~ ^[0-9]+$ ]]; then
+            {
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Monitoring overhead measurement started for wrapper PID: $wrapper_pid" >&2
+
+                # Print header
+                LC_ALL=C LANG=C pidstat -h -u -r -d -w -l | head -5 | pidstat_to_csv 1 | head -1
+
+                while [[ -f "${EXPERIMENT_DIR}/monitoring_active" ]]; do
+                    # Get all monitoring process PIDs (wrapper + all monitoring children)
+                    if [[ -f "${EXPERIMENT_DIR}/monitoring_pids.txt" ]]; then
+                        # Monitor wrapper and all its monitoring children
+                        monitoring_pids="$wrapper_pid"
+                        while read -r mpid; do
+                            [[ -n "$mpid" && "$mpid" =~ ^[0-9]+$ ]] && monitoring_pids="$monitoring_pids,$mpid"
+                        done < "${EXPERIMENT_DIR}/monitoring_pids.txt"
+
+                        # Execute pidstat on all monitoring processes
+                        LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -p "$monitoring_pids" "${SYSTEM_SAMPLE_SECS}" 1 \
+                        | pidstat_to_csv
+                    else
+                        # Fallback: monitor only wrapper
+                        LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -p "$wrapper_pid" "${SYSTEM_SAMPLE_SECS}" 1 \
+                        | pidstat_to_csv
+                    fi
+
+                    sleep "${SYSTEM_SAMPLE_SECS}"
+                done
+
+                echo "$(date '+%Y-%m-%d %H:%M:%S') Monitoring overhead measurement completed" >&2
+            } > "${sys_prefix}_monitoring_overhead.csv" 2> "${sys_prefix_log}_monitoring_overhead.log" &
+
+            add_monitoring_pid $! "monitoring_overhead"
+            log_info "Self-monitoring: enabled (tracking wrapper + all monitoring processes)"
+        else
+            log_warn "Self-monitoring: wrapper PID not available, skipping overhead measurement"
+        fi
+    else
+        log_warn "Self-monitoring: pidstat not available, cannot measure overhead"
+    fi
+
     log_info "System monitoring setup completed"
 }
 
@@ -710,9 +762,9 @@ start_process_monitoring() {
     {
         echo "$(date '+%Y-%m-%d %H:%M:%S') Process group I/O monitor started for PGID: $python_pgid" >&2
         echo "timestamp,pgid,pid,read_bytes,write_bytes,read_syscalls,write_syscalls,read_chars,write_chars,cancelled_write_bytes"
-        
+
         while kill -0 "-$python_pgid" 2>/dev/null; do
-            current_time=$(date '+%Y-%m-%d %H:%M:%S')
+            current_time=$(date +%s.%N)
             
             # Find all PIDs belonging to process group
             group_pids=$(pgrep -g "$python_pgid" 2>/dev/null || true)
@@ -751,29 +803,58 @@ start_process_monitoring() {
     if command -v perf &> /dev/null; then
         {
             echo "$(date '+%Y-%m-%d %H:%M:%S') Starting perf monitoring for PGID $python_pgid" >&2
-            
+
             # Calculate interval in milliseconds
             local interval=$(echo "($SYSTEM_SAMPLE_SECS * 1000) / 1" | bc | cut -d'.' -f1)
-            
+
             # Get all current PIDs of process group (including existing children)
             group_pids=$(pgrep -g "$python_pgid" 2>/dev/null || true)
-            
+
             if [[ -n "$group_pids" ]]; then
                 # Build comma-separated PID list for perf
                 pid_list=$(echo "$group_pids" | tr '\n' ',' | sed 's/,$//')
-                
+
                 echo "$(date '+%Y-%m-%d %H:%M:%S') Monitoring PIDs: $pid_list" >&2
-                
-                # Monitor all PIDs in group with parseable output
+
+                # Write CSV header
+                echo "timestamp,value,unit,event,time_enabled,time_running,metric_value,metric_unit" > "${output_prefix}_perf.csv"
+
+                # Monitor all PIDs in group with parseable output, convert to CSV in real-time
                 perf stat -p "$pid_list" -I $interval -x ';' --no-big-num \
                     -e cycles,instructions,cache-references,cache-misses,branches,branch-misses,page-faults,context-switches,cpu-migrations \
-                    -o "${output_prefix}_perf_raw.csv" --append
+                    2>&1 | stdbuf -oL -eL awk -F';' '
+                        # Skip comment lines
+                        /^#/ { next }
+
+                        # Process data lines (8 fields from perf -x output)
+                        NF >= 4 {
+                            # Trim leading/trailing whitespace from all fields
+                            for (i=1; i<=NF; i++) {
+                                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+                            }
+
+                            # Perf output format: timestamp;value;unit;event;time_enabled;time_running;[metric_value;metric_unit]
+                            # Ensure we have at least 6 fields, pad with empty if needed
+                            timestamp = $1
+                            value = $2
+                            unit = $3
+                            event = $4
+                            time_enabled = (NF >= 5) ? $5 : ""
+                            time_running = (NF >= 6) ? $6 : ""
+                            metric_value = (NF >= 7) ? $7 : ""
+                            metric_unit = (NF >= 8) ? $8 : ""
+
+                            # Print as CSV
+                            print timestamp "," value "," unit "," event "," time_enabled "," time_running "," metric_value "," metric_unit
+                            fflush()
+                        }
+                    ' >> "${output_prefix}_perf.csv"
             else
                 echo "$(date '+%Y-%m-%d %H:%M:%S') No PIDs found in process group $python_pgid" >&2
             fi
-                
+
             echo "$(date '+%Y-%m-%d %H:%M:%S') Perf monitoring completed for PGID $python_pgid" >&2
-                
+
         } > "${output_prefix_log}_perf.log" 2>&1 &
         
         add_monitoring_pid $! "process_perf"

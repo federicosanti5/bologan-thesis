@@ -1,0 +1,5 @@
+// collegamento
+ssh federico.santi5@ophfe1
+
+// trasferimento file da oph
+rsync -avz federico.santi5@ophfe1:/home/path_origin /home/saint/path_destination
