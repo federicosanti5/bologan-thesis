@@ -714,14 +714,22 @@ start_monitoring() {
                 while [[ -f "${EXPERIMENT_DIR}/monitoring_active" ]]; do
                     # Get all monitoring process PIDs (wrapper + all monitoring children)
                     if [[ -f "${EXPERIMENT_DIR}/monitoring_pids.txt" ]]; then
-                        # Monitor wrapper and all its monitoring children
-                        monitoring_pids="$wrapper_pid"
+                        # Monitor wrapper and all its monitoring children using PGID
+                        # Since we use setsid, each monitoring tool runs in its own process group
+                        # The PID saved in monitoring_pids.txt is the shell (sh -c) which is also the PGID
+                        # We use pidstat -g to monitor the entire process group (shell + actual tools)
+
+                        monitoring_pgids="$wrapper_pid"
                         while read -r mpid; do
-                            [[ -n "$mpid" && "$mpid" =~ ^[0-9]+$ ]] && monitoring_pids="$monitoring_pids,$mpid"
+                            if [[ -n "$mpid" && "$mpid" =~ ^[0-9]+$ ]]; then
+                                # Add PGID (which equals the shell PID due to setsid)
+                                monitoring_pgids="$monitoring_pgids,$mpid"
+                            fi
                         done < "${EXPERIMENT_DIR}/monitoring_pids.txt"
 
-                        # Execute pidstat on all monitoring processes
-                        LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -p "$monitoring_pids" "${SYSTEM_SAMPLE_SECS}" 1 \
+                        # Execute pidstat on all monitoring process groups (-g for PGID)
+                        # This will capture the actual tools (vmstat, iostat, etc.) running inside each shell
+                        LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -g "$monitoring_pgids" "${SYSTEM_SAMPLE_SECS}" 1 \
                         | pidstat_to_csv
                     else
                         # Fallback: monitor only wrapper
@@ -736,7 +744,7 @@ start_monitoring() {
             } > "${sys_prefix}_monitoring_overhead.csv" 2> "${sys_prefix_log}_monitoring_overhead.log" &
 
             add_monitoring_pid $! "monitoring_overhead"
-            log_info "Self-monitoring: enabled (tracking wrapper + all monitoring processes)"
+            log_info "Self-monitoring: enabled (tracking wrapper + all monitoring process groups via PGID)"
         else
             log_warn "Self-monitoring: wrapper PID not available, skipping overhead measurement"
         fi
@@ -1225,19 +1233,11 @@ if [[ ${task} == *'train'* ]] && [[ $command_exit_code -eq 0 ]]; then
 
         log_info "Copying training artifacts (selective)..."
 
-        # Find all subdirectories (e.g., pions_eta_20_25/train/)
-        find "$output_dir" -type d | while read subdir; do
-            # Recreate directory structure
-            rel_path="${subdir#$output_dir/}"
-            if [[ -n "$rel_path" ]]; then
-                mkdir -p "${EXPERIMENT_DIR}/training_output/$rel_path"
-            fi
-        done
-
         # Copy config.json files
         if find "$output_dir" -name "config.json" -type f 2>/dev/null | grep -q .; then
             find "$output_dir" -name "config.json" -type f -exec bash -c '
                 rel_path="${1#'"$output_dir"'/}"
+                mkdir -p "$(dirname "'"${EXPERIMENT_DIR}"'/training_output/$rel_path")"
                 cp "$1" "'"${EXPERIMENT_DIR}"'/training_output/$rel_path"
             ' _ {} \;
             log_info "  ✓ config.json (training configuration)"
@@ -1247,6 +1247,7 @@ if [[ ${task} == *'train'* ]] && [[ $command_exit_code -eq 0 ]]; then
         if find "$output_dir" -name "model.txt" -type f 2>/dev/null | grep -q .; then
             find "$output_dir" -name "model.txt" -type f -exec bash -c '
                 rel_path="${1#'"$output_dir"'/}"
+                mkdir -p "$(dirname "'"${EXPERIMENT_DIR}"'/training_output/$rel_path")"
                 cp "$1" "'"${EXPERIMENT_DIR}"'/training_output/$rel_path"
             ' _ {} \;
             log_info "  ✓ model.txt (architecture)"
@@ -1257,13 +1258,11 @@ if [[ ${task} == *'train'* ]] && [[ $command_exit_code -eq 0 ]]; then
             pdf_count=$(find "$output_dir" -name "*.pdf" -type f | wc -l)
             find "$output_dir" -name "*.pdf" -type f -exec bash -c '
                 rel_path="${1#'"$output_dir"'/}"
+                mkdir -p "$(dirname "'"${EXPERIMENT_DIR}"'/training_output/$rel_path")"
                 cp "$1" "'"${EXPERIMENT_DIR}"'/training_output/$rel_path"
             ' _ {} \;
             log_info "  ✓ *.pdf plots ($pdf_count files)"
         fi
-
-        # Create symlink for easy access
-        ln -sf "${EXPERIMENT_DIR}/training_output" "${EXPERIMENT_DIR}/output"
 
         # Summary
         total_size=$(du -sh "${EXPERIMENT_DIR}/training_output" 2>/dev/null | cut -f1)

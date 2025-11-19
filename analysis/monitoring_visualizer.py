@@ -538,10 +538,45 @@ class MonitoringVisualizer:
         lines3, labels3 = ax3.get_legend_handles_labels()
         ax1.legend(lines1 + lines2 + lines3, labels1 + labels2 + labels3, loc='upper left', fontsize=9)
 
-        # Throttling detection
-        if thermal_df['thermal_zone0_c'].max() > 80:
-            ax1.axhline(y=80, color='red', linestyle=':', linewidth=2, alpha=0.7, label='Throttle Threshold')
-            ax1.text(0.02, 0.98, '⚠️  Thermal throttling detected',
+        # Throttling detection (enhanced)
+        throttle_threshold = 80  # °C
+        max_temp = thermal_df['thermal_zone0_c'].max()
+        throttling_detected = False
+
+        if max_temp > throttle_threshold:
+            throttling_detected = True
+            ax1.axhline(y=throttle_threshold, color='red', linestyle=':', linewidth=2, alpha=0.7, label='Throttle Threshold')
+
+            # Detect frequency drops correlated with temp spikes
+            # Check if frequency drops when temperature is high
+            high_temp_mask = thermal_df['thermal_zone0_c'] > throttle_threshold
+            if high_temp_mask.sum() > 0 and len(freq_df) > 0:
+                # Get timestamps where temp > threshold
+                high_temp_times = thermal_df.loc[high_temp_mask, 'timestamp_rel'].values
+
+                # Check if frequency dropped during those times (simplified check)
+                # Compare avg freq during high temp vs overall avg
+                overall_avg_freq = freq_smoothed.mean()
+                freq_during_hot = []
+
+                for t in high_temp_times[:min(10, len(high_temp_times))]:  # Sample first 10 events
+                    closest_idx = (np.abs(freq_df['timestamp_rel'].values - t)).argmin()
+                    freq_during_hot.append(freq_smoothed.iloc[closest_idx])
+
+                if len(freq_during_hot) > 0:
+                    avg_freq_hot = np.mean(freq_during_hot)
+                    freq_drop_pct = (overall_avg_freq - avg_freq_hot) / overall_avg_freq * 100
+
+                    if freq_drop_pct > 5:  # Significant drop
+                        warning_text = f'⚠️  Thermal throttling detected\n(Freq drop: {freq_drop_pct:.1f}%)'
+                    else:
+                        warning_text = f'⚠️  High temperature detected\n(No significant freq drop)'
+                else:
+                    warning_text = '⚠️  High temperature detected'
+            else:
+                warning_text = '⚠️  High temperature detected'
+
+            ax1.text(0.02, 0.98, warning_text,
                     transform=ax1.transAxes, fontsize=10, verticalalignment='top',
                     bbox=dict(boxstyle='round', facecolor='red', alpha=0.3))
 
@@ -711,6 +746,24 @@ class MonitoringVisualizer:
             print("⚠️  Warning: Insufficient training data for power vs loss plot")
             return ""
 
+        # Calculate Pearson correlation between power and losses
+        # Interpolate power values at loss timestamps for alignment
+        from scipy.stats import pearsonr
+
+        power_at_loss_times = np.interp(timestamps, rapl_df['timestamp_rel'], rapl_df['power_total'])
+
+        # Correlation: Power vs Gloss
+        if len(power_at_loss_times) > 2 and len(gloss) > 2:
+            r_gloss, p_gloss = pearsonr(power_at_loss_times, gloss)
+        else:
+            r_gloss, p_gloss = np.nan, np.nan
+
+        # Correlation: Power vs Dloss
+        if len(power_at_loss_times) > 2 and len(dloss) > 2:
+            r_dloss, p_dloss = pearsonr(power_at_loss_times, dloss)
+        else:
+            r_dloss, p_dloss = np.nan, np.nan
+
         # Even wider figsize for clarity
         fig, ax1 = plt.subplots(figsize=(20, 6))
 
@@ -738,6 +791,27 @@ class MonitoringVisualizer:
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc='lower right', fontsize=10)
 
+        # Correlation annotation box
+        if not np.isnan(r_gloss):
+            corr_text = f'Pearson Correlation:\n'
+            corr_text += f'Power ↔ Gloss: r={r_gloss:.3f}, p={p_gloss:.3e}\n'
+            corr_text += f'Power ↔ Dloss: r={r_dloss:.3f}, p={p_dloss:.3e}\n\n'
+
+            # Interpretation
+            if abs(r_gloss) > 0.7:
+                interp_gloss = "Strong"
+            elif abs(r_gloss) > 0.4:
+                interp_gloss = "Moderate"
+            else:
+                interp_gloss = "Weak"
+
+            corr_text += f'Power-Gloss: {interp_gloss} correlation'
+
+            ax1.text(0.02, 0.98, corr_text,
+                    transform=ax1.transAxes, fontsize=9,
+                    verticalalignment='top', horizontalalignment='left',
+                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9, edgecolor='black'))
+
         plt.tight_layout()
         output_path = self.output_dir / f'power_vs_loss_evolution.{self.image_ext}'
         plt.savefig(output_path, dpi=self.dpi, bbox_inches='tight', format=self.image_format)
@@ -747,14 +821,16 @@ class MonitoringVisualizer:
 
     def plot_workload_characterization(self, vmstat_df: pd.DataFrame,
                                       perf_df: Optional[pd.DataFrame],
-                                      performance_metrics: Dict) -> str:
+                                      performance_metrics: Dict,
+                                      rapl_df: Optional[pd.DataFrame] = None) -> str:
         """
-        Plot 9: Workload Characterization (2D scatter: IPC vs iowait).
+        Plot 9: Workload Characterization (2D bubble chart: IPC vs iowait).
 
         Args:
             vmstat_df: DataFrame with vmstat data
             perf_df: DataFrame with perf data (optional)
             performance_metrics: Dict with 'ipc' and 'throughput_samples_per_s'
+            rapl_df: DataFrame with RAPL power data (optional, for bubble size)
 
         Returns:
             Path to saved plot
@@ -840,12 +916,62 @@ class MonitoringVisualizer:
         if throughput is None:
             throughput = 0
 
+        # Get power data for bubble sizing (if RAPL available)
+        power_values = None
+        timestamps = None
+        if rapl_df is not None and len(rapl_df) > 0:
+            rapl_df = self._ensure_timestamp_rel(rapl_df)
+            rapl_df = self._standardize_rapl_columns(rapl_df)
+
+            # Calculate total power if not present
+            if 'power_total' not in rapl_df.columns:
+                rapl_df['power_total'] = (
+                    rapl_df['power_package_0'] + rapl_df['power_package_1'] +
+                    rapl_df['power_dram_0'] + rapl_df['power_dram_1']
+                )
+
+            # Merge with existing data to get power per point
+            if perf_df is not None and len(merged) > 0:
+                # Add timestamp_rel to merged for power merge
+                merged_with_power = pd.merge_asof(
+                    merged.sort_values('timestamp_rel'),
+                    rapl_df[['timestamp_rel', 'power_total']].sort_values('timestamp_rel'),
+                    on='timestamp_rel',
+                    direction='nearest',
+                    tolerance=2.0
+                ).dropna()
+
+                if len(merged_with_power) > 0:
+                    power_values = merged_with_power['power_total'].values
+                    timestamps = merged_with_power['timestamp_rel'].values
+                    # Update ipc/iowait arrays to match
+                    ipc_values = merged_with_power['ipc'].values
+                    iowait_values = merged_with_power['wa'].values
+
         # Plot
         fig, ax = plt.subplots(figsize=(10, 8))
 
-        # Scatter - simple blue points without throughput coloring
-        ax.scatter(ipc_values, iowait_values,
-                  s=150, alpha=0.5, color='#3498db', edgecolors='black', linewidth=1)
+        # Bubble chart with power-based sizing and temporal color gradient
+        if power_values is not None and timestamps is not None:
+            # Normalize power for bubble size (50-500 range)
+            power_normalized = 50 + 450 * (power_values - power_values.min()) / (power_values.max() - power_values.min() + 1e-6)
+
+            # Color by temporal evolution (blue → red gradient)
+            scatter = ax.scatter(ipc_values, iowait_values,
+                                s=power_normalized,
+                                c=timestamps,
+                                cmap='viridis',
+                                alpha=0.6,
+                                edgecolors='black',
+                                linewidth=0.8)
+
+            # Add colorbar for temporal evolution
+            cbar = plt.colorbar(scatter, ax=ax, label='Time (s)')
+            cbar.ax.tick_params(labelsize=9)
+        else:
+            # Fallback: simple scatter without power sizing
+            ax.scatter(ipc_values, iowait_values,
+                      s=150, alpha=0.5, color='#3498db', edgecolors='black', linewidth=1)
 
         # Add mean working point marker - modern pin style (single marker)
         avg_ipc = np.mean(ipc_values)
@@ -1291,8 +1417,9 @@ class MonitoringVisualizer:
         if 'vmstat' in dfs:
             print("\n[9/11] Workload Characterization...")
             perf_df = dfs.get('perf', None)
+            rapl_df = dfs.get('rapl', None)
             path = self.plot_workload_characterization(
-                dfs['vmstat'], perf_df, metrics.get('performance', {})
+                dfs['vmstat'], perf_df, metrics.get('performance', {}), rapl_df
             )
             if path:
                 plot_paths['workload_characterization'] = path

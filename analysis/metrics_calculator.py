@@ -570,22 +570,62 @@ class MetricsCalculator:
 
         # Aggregate by tool (command name)
         if command_col in overhead_df.columns and cpu_col in overhead_df.columns:
-            # Group by command and calculate average CPU%
-            tools_cpu = overhead_df.groupby(command_col)[cpu_col].mean()
-            result['tools'] = tools_cpu.to_dict()
+            # Extract tool names from commands (e.g., "pidstat -h -r -u ..." -> "pidstat")
+            def extract_tool_name(cmd: str) -> str:
+                """Extract tool name from command string."""
+                if pd.isna(cmd):
+                    return "unknown"
+
+                # Common monitoring tools
+                for tool in ['pidstat', 'vmstat', 'iostat', 'perf', 'mpstat', 'sar']:
+                    if tool in cmd.lower():
+                        return tool
+
+                # If bash/sh wrapper script, return "wrapper"
+                if 'bash' in cmd.lower() or '/bin/sh' in cmd.lower():
+                    if 'enhanced_wrapper' in cmd or 'wrapper' in cmd:
+                        return 'monitoring_wrapper'
+                    return 'bash'
+
+                # Otherwise extract first word of command
+                parts = cmd.strip().split()
+                if parts:
+                    tool = parts[0].split('/')[-1]  # Get basename
+                    return tool
+
+                return "unknown"
+
+            # Add tool column
+            overhead_df['tool'] = overhead_df[command_col].apply(extract_tool_name)
+
+            # Group by tool and calculate metrics
+            tools_cpu = overhead_df.groupby('tool')[cpu_col].mean()
+            tools_mem = overhead_df.groupby('tool')[rss_col].mean() if rss_col in overhead_df.columns else None
+
+            # Build per_tool_breakdown dict (format expected by plot)
+            per_tool_breakdown = {}
+            for tool in tools_cpu.index:
+                per_tool_breakdown[tool] = {
+                    'cpu_percent': tools_cpu[tool],
+                    'memory_mb': tools_mem[tool] / 1024.0 if tools_mem is not None else 0.0
+                }
+
+            result['per_tool_breakdown'] = per_tool_breakdown
+            result['tools'] = tools_cpu.to_dict()  # Keep for backward compatibility
 
             # Total CPU overhead
-            result['cpu_overhead_percent'] = tools_cpu.sum()
+            result['total_cpu_percent'] = tools_cpu.sum()
+            result['cpu_overhead_percent'] = tools_cpu.sum()  # Keep for backward compatibility
 
-            # Memory overhead (RSS in kB)
-            if rss_col in overhead_df.columns:
-                tools_mem = overhead_df.groupby(command_col)[rss_col].mean()
-                result['memory_overhead_mb'] = tools_mem.sum() / 1024.0  # kB to MB
+            # Total memory overhead (RSS in kB)
+            if tools_mem is not None:
+                result['total_memory_mb'] = tools_mem.sum() / 1024.0
+                result['memory_overhead_mb'] = tools_mem.sum() / 1024.0  # Keep for backward compatibility
 
             if self.verbose:
-                print(f"  Total CPU overhead: {result['cpu_overhead_percent']:.2f}%")
-                print(f"  Total memory overhead: {result.get('memory_overhead_mb', 'N/A')} MB")
-                print(f"  Tools monitored: {len(result['tools'])}")
+                print(f"  Total CPU overhead: {result['total_cpu_percent']:.2f}%")
+                print(f"  Total memory overhead: {result.get('total_memory_mb', 'N/A')} MB")
+                print(f"  Tools monitored: {len(per_tool_breakdown)}")
         else:
             if self.verbose:
                 print(f"  ⚠️  Expected columns (command/cpu_percent or Command/%CPU) not found")

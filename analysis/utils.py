@@ -16,65 +16,86 @@ from typing import Dict, List, Tuple, Optional, Union
 
 
 def handle_rapl_overflow(energy_series: pd.Series,
-                         max_value: int = 2**32) -> pd.Series:
+                         max_value: int = None,
+                         lookback_window: int = 5) -> pd.Series:
     """
-    Handle RAPL counter overflow for 32-bit energy counters.
+    Handle RAPL counter overflow by estimating lost energy from previous power trend.
 
-    RAPL (Running Average Power Limit) energy counters are 32-bit unsigned integers
-    that overflow approximately every 262 seconds at 100W power consumption.
+    When RAPL counters overflow/wrap, we lose data. This function detects wraps and
+    estimates the energy consumed during the wrap interval based on the average power
+    consumption observed before the wrap.
 
-    Detection: E[i+1] < E[i] indicates overflow
-    Correction: cumulative_energy += (MAX - E[i]) + E[i+1]
+    Detection: E[i+1] < E[i] indicates overflow (simple consecutive comparison)
+    Correction: Estimate delta from average power of previous samples
 
     Args:
         energy_series: pandas Series with raw RAPL energy values (microJoules)
-        max_value: Maximum counter value before overflow (default: 2^32)
+        max_value: Unused (kept for API compatibility)
+        lookback_window: Number of previous samples to use for power estimation (default: 5)
 
     Returns:
         pandas Series with corrected cumulative energy values
 
     Example:
-        >>> raw_energy = pd.Series([100, 200, 50, 150])  # 50 < 200 = overflow
-        >>> corrected = handle_rapl_overflow(raw_energy, max_value=256)
-        >>> print(corrected)
-        0    100
-        1    200
-        2    306  # (256-200) + 50
-        3    406  # 306 + (150-50)
+        >>> # Normal samples at ~100 uJ/sample, then wrap occurs
+        >>> raw_energy = pd.Series([100, 200, 300, 400, 50])  # 50 < 400 = overflow
+        >>> corrected = handle_rapl_overflow(raw_energy)
+        >>> # Delta estimated from avg power: (200-100 + 300-200 + 400-300)/3 = 100 uJ/sample
+        >>> # So delta at wrap ≈ 100 uJ
 
     Notes:
-        - Assumes monotonically increasing energy consumption
+        - Overflow detection based on consecutive value comparison only
+        - Estimates lost energy from power trend before wrap
         - Handles multiple overflow events in sequence
-        - Returns cumulative energy (always increasing)
+        - Returns cumulative energy starting from 0 (always increasing)
     """
     if len(energy_series) == 0:
         return energy_series
 
-    corrected = np.zeros(len(energy_series), dtype=np.float64)
-    cumulative = 0.0
-    prev_value = 0.0
+    # Convert to float array for processing
+    values = np.array(energy_series, dtype=np.float64)
+    corrected = np.zeros(len(values), dtype=np.float64)
 
-    for i, value in enumerate(energy_series):
-        if pd.isna(value):
+    # Track cumulative energy starting from 0
+    cumulative = 0.0
+
+    for i in range(len(values)):
+        if pd.isna(values[i]):
             corrected[i] = np.nan
             continue
 
         if i == 0:
-            # First value: initialize
-            cumulative = float(value)
-            prev_value = float(value)
+            # First value: initialize cumulative at 0
+            corrected[i] = 0.0
         else:
-            if value < prev_value:
-                # Overflow detected
-                delta = (max_value - prev_value) + value
-                cumulative += delta
-            else:
-                # Normal increment
-                delta = value - prev_value
-                cumulative += delta
-            prev_value = float(value)
+            # Simple overflow detection: current < previous means wrap occurred
+            if values[i] < values[i-1]:
+                # Overflow/wrap detected: counter reset, data lost
+                # Estimate energy from average power of previous samples
 
-        corrected[i] = cumulative
+                # Calculate how many previous samples we can use
+                start_idx = max(1, i - lookback_window)
+
+                # Compute deltas (energy per interval) from previous samples
+                prev_deltas = []
+                for j in range(start_idx, i):
+                    if not pd.isna(values[j]) and not pd.isna(values[j-1]):
+                        # Only use non-wrap deltas
+                        if values[j] >= values[j-1]:
+                            prev_deltas.append(values[j] - values[j-1])
+
+                # Estimate delta from average of previous deltas
+                if prev_deltas:
+                    delta = np.mean(prev_deltas)
+                else:
+                    # Fallback: if no previous valid deltas, use current value as rough estimate
+                    delta = values[i]
+            else:
+                # Normal case: simple difference
+                delta = values[i] - values[i-1]
+
+            cumulative += delta
+            corrected[i] = cumulative
 
     return pd.Series(corrected, index=energy_series.index)
 
