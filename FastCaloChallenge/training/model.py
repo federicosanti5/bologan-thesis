@@ -55,6 +55,7 @@ class WGANGP:
         self.particle = job_config.get('particle', 'photons')
         self.eta_slice = job_config.get('eta_slice', '20_25')
         self.checkpoint_interval = job_config.get('checkpoint_interval', 1000)
+        self.log_interval = job_config.get('log_interval', self.checkpoint_interval)  # Default: same as checkpoint
         self.output = os.path.join(job_config.get('output', '../output'), f'{self.particle}_eta_{self.eta_slice}')
         if self.loading is not None:
             self.output += '_load'
@@ -528,6 +529,7 @@ class WGANGP:
             logging.info(f"Load model from {self.loading}")
 
         for iteration in range(0, self.max_iter + 1):
+            # Checkpoint saving (less frequent)
             if iteration % self.checkpoint_interval == 0:
                 if len(existing_models) > 1:
                     with open(os.path.join(self.train_folder, 'result.json'), 'r') as fp:
@@ -553,6 +555,14 @@ class WGANGP:
                     logging.info(f"Iter: {iteration}; Dloss: {D_loss_curr:.4f}; Gloss: {G_loss_curr:.4f}; TotalTime: {time_diff:.2f}; GetNext: {dur_getnext_loop:.4f}, ConvertLoop: {dur_convert_loop:.2f}, TrainLoop: {dur_train_loop:.2f}, Save: {save_time:.2}")
                     self.plot_loss(verbose='ERROR')
                     dur_train_loop, dur_convert_loop, dur_getnext_loop = 0, 0, 0
+
+            # Dense logging (more frequent, separate from checkpoint)
+            elif iteration % self.log_interval == 0 and iteration > 0:
+                e_time = time.time()
+                time_diff = e_time - s_time
+                s_time = e_time
+                logging.info(f"Iter: {iteration}; Dloss: {D_loss_curr:.4f}; Gloss: {G_loss_curr:.4f}; TotalTime: {time_diff:.2f}; GetNext: {dur_getnext_loop:.4f}, ConvertLoop: {dur_convert_loop:.2f}, TrainLoop: {dur_train_loop:.2f}, Save: 0.00")
+                dur_train_loop, dur_convert_loop, dur_getnext_loop = 0, 0, 0
 
 
             getnext_loop_start = time.time()

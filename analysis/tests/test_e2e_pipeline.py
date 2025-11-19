@@ -16,15 +16,12 @@ import sys
 import json
 from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+# Add parent directory to path for imports (analysis/)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-try:
-    from monitoring_data_loader import MonitoringDataLoader
-    from metrics_calculator import MetricsCalculator
-except ImportError:
-    from analysis.monitoring_data_loader import MonitoringDataLoader
-    from analysis.metrics_calculator import MetricsCalculator
+from monitoring_data_loader import MonitoringDataLoader
+from metrics_calculator import MetricsCalculator
+from monitoring_visualizer import MonitoringVisualizer
 
 
 def print_separator(title, char="="):
@@ -50,8 +47,10 @@ def validate_sanity(value, min_val, max_val, name):
 def test_e2e_pipeline():
     """Run end-to-end test on real cluster data"""
 
-    # Experiment directory (cluster data)
-    exp_dir = Path(__file__).parent.parent / 'results' / 'oph' / 'monitoring' / 'exp_20250918_182245'
+    # Experiment directory - UPDATED to test dense logging
+    # Path: tests/test_e2e_pipeline.py → parent.parent.parent = tesi/
+    # exp_dir = Path(__file__).parent.parent.parent / 'results' / 'oph' / 'monitoring' / 'exp_20251118_103745'  # Old: 6 points
+    exp_dir = Path(__file__).parent.parent.parent / 'results' / 'monitoring' / 'exp_20251118_135510'  # New: 11 points (dense logging)
 
     if not exp_dir.exists():
         print(f"❌ Experiment directory not found: {exp_dir}")
@@ -255,6 +254,61 @@ def test_e2e_pipeline():
     else:
         print("\n[EFFICIENCY METRICS] - ⚠️  Not available")
 
+    # --- Convergence Metrics ---
+    if 'convergence' in all_metrics and all_metrics['convergence']:
+        print("\n[CONVERGENCE METRICS]")
+        conv = all_metrics['convergence']
+
+        num_points = conv.get('num_data_points', 0)
+        log_interval = conv.get('log_interval')
+        if num_points > 0:
+            print(f"\n  Training Data Points: {num_points}")
+            if log_interval:
+                print(f"  Log Interval: {log_interval} iterations")
+                print(f"  ✅ Dense logging enabled (time-series analysis ready)")
+                validation_passed.append(True)
+            else:
+                print(f"  ⚠️  Log interval not detected")
+                validation_passed.append(False)
+
+        final_gloss = conv.get('final_gloss')
+        final_dloss = conv.get('final_dloss')
+        if final_gloss is not None and final_dloss is not None:
+            print(f"\n  Final Generator Loss: {final_gloss:.4f}")
+            print(f"  Final Discriminator Loss: {final_dloss:.4f}")
+
+        gan_balance = conv.get('gan_balance')
+        if gan_balance is not None:
+            print(f"\n  GAN Balance (|G|/|D|): {gan_balance:.3f}")
+            if 0.5 <= gan_balance <= 2.0:
+                print(f"  ✅ Well-balanced GAN training")
+                validation_passed.append(True)
+            else:
+                print(f"  ⚠️  Imbalanced training (may affect quality)")
+                validation_passed.append(False)
+
+        stability_g = conv.get('loss_stability_gloss')
+        stability_d = conv.get('loss_stability_dloss')
+        if stability_g is not None and stability_d is not None:
+            print(f"\n  Loss Stability (final 20%):")
+            print(f"    Generator:     σ = {stability_g:.4f}")
+            print(f"    Discriminator: σ = {stability_d:.4f}")
+            if stability_g < 0.1 and stability_d < 0.1:
+                print(f"  ✅ Stable convergence")
+                validation_passed.append(True)
+            else:
+                print(f"  ⚠️  High variability in final phase")
+                validation_passed.append(False)
+
+        conv_iter = conv.get('convergence_iteration')
+        if conv_iter is not None:
+            print(f"\n  Convergence Iteration: {conv_iter}")
+            print(f"    (Point where loss stabilizes)")
+
+    else:
+        print("\n[CONVERGENCE METRICS] - ⚠️  Not available (missing training loss data)")
+        validation_passed.append(False)
+
     # --- Monitoring Overhead ---
     if 'monitoring_overhead' in all_metrics and all_metrics['monitoring_overhead']:
         print("\n[MONITORING OVERHEAD] - 🆕 Unique Feature")
@@ -286,6 +340,49 @@ def test_e2e_pipeline():
 
     else:
         print("\n[MONITORING OVERHEAD] - ⚠️  Not available")
+
+    # --- Derived Metrics ---
+    if 'derived' in all_metrics and all_metrics['derived']:
+        print("\n[DERIVED METRICS] - 🆕 Workload Characterization")
+        derived = all_metrics['derived']
+
+        if derived.get('workload_type'):
+            print(f"\n  Workload Type: {derived['workload_type']}")
+            if derived['workload_type'] in ['compute-bound', 'balanced']:
+                print(f"  ✅ Expected for GAN training")
+                validation_passed.append(True)
+
+        if derived.get('io_bottleneck_score') is not None:
+            score = derived['io_bottleneck_score']
+            print(f"\n  I/O Bottleneck Score: {score:.2f}")
+            if score < 5:
+                print(f"  ✅ Low I/O bottleneck")
+                validation_passed.append(True)
+            else:
+                print(f"  ⚠️  Potential I/O bottleneck detected")
+                validation_passed.append(False)
+
+        if derived.get('thermal_throttling_events') is not None:
+            events = derived['thermal_throttling_events']
+            print(f"\n  Thermal Throttling Events: {events}")
+            if events > 0:
+                print(f"  ⚠️  CPU frequency was throttled {events} times")
+            else:
+                print(f"  ✅ No thermal throttling detected")
+
+        if derived.get('power_profile'):
+            pp = derived['power_profile']
+            print(f"\n  Power Profile:")
+            print(f"    Mean:   {pp['mean_w']:.1f} W")
+            print(f"    Std:    {pp['std_w']:.1f} W")
+            print(f"    Range:  {pp['min_w']:.1f} - {pp['max_w']:.1f} W")
+            print(f"    Median: {pp['median_w']:.1f} W")
+            validation_passed.append(
+                validate_sanity(pp['mean_w'], 50, 500, "Power Profile Mean (W)")
+            )
+
+    else:
+        print("\n[DERIVED METRICS] - ⚠️  Not available")
 
     # --- Correlations ---
     if 'correlations' in all_metrics and all_metrics['correlations']:
@@ -338,7 +435,49 @@ def test_e2e_pipeline():
         print("\n[TRAINING METRICS] - ⚠️  Not parsed (expected for old stdout format)")
 
     # =====================================================================
-    # STEP 4: Summary
+    # STEP 4: Visualization
+    # =====================================================================
+    print_separator("STEP 4: PLOT GENERATION")
+
+    print("\nInitializing MonitoringVisualizer...")
+    output_dir = exp_dir / 'analysis' / 'plots'
+    visualizer = MonitoringVisualizer(output_dir=str(output_dir), dpi=150)  # Lower DPI for testing
+    print(f"  Output directory: {output_dir}")
+
+    print("\nGenerating all plots...")
+    try:
+        plot_paths = visualizer.generate_all_plots(dfs, all_metrics)
+
+        print(f"\n✅ Successfully generated {len(plot_paths)} plots:")
+        for plot_name, plot_path in plot_paths.items():
+            file_size = Path(plot_path).stat().st_size / 1024  # KB
+            print(f"  ✅ {plot_name:30s}: {file_size:6.1f} KB")
+            validation_passed.append(True)
+
+        # Verify essential plots (that don't require RAPL)
+        essential_plots = ['memory_usage', 'loss_evolution']
+        missing_essential = [p for p in essential_plots if p not in plot_paths]
+        if missing_essential:
+            print(f"\n⚠️  Missing essential plots: {missing_essential}")
+            validation_passed.append(False)
+        else:
+            print(f"\n✅ All essential plots generated successfully!")
+            validation_passed.append(True)
+
+        # Optional plots (require RAPL or perf data)
+        optional_plots = ['power_profile', 'energy_breakdown', 'frequency_vs_power', 'thermal_analysis']
+        available_optional = [p for p in optional_plots if p in plot_paths]
+        if available_optional:
+            print(f"  ✅ Optional energy plots: {len(available_optional)}/{len(optional_plots)}")
+
+    except Exception as e:
+        print(f"\n❌ Error generating plots: {e}")
+        import traceback
+        traceback.print_exc()
+        validation_passed.append(False)
+
+    # =====================================================================
+    # STEP 5: Summary
     # =====================================================================
     print_separator("SUMMARY")
 
@@ -352,22 +491,26 @@ def test_e2e_pipeline():
         bool(all_metrics.get('performance')),
         bool(all_metrics.get('efficiency')),
         bool(all_metrics.get('monitoring_overhead')),
+        bool(all_metrics.get('derived')),
         bool(all_metrics.get('correlations')),
     ])
 
-    print(f"Metric categories: {metrics_computed}/5 computed")
+    print(f"Metric categories: {metrics_computed}/6 computed")
 
     print("\n✅ Key achievements:")
     print("   - MonitoringDataLoader: Successfully loaded real cluster data")
     print("   - MetricsCalculator: Computed all available metrics")
+    print("   - MonitoringVisualizer: Generated publication-quality plots")
     print("   - RAPL overflow handling: Validated on real data")
     print("   - Energy breakdown: CPU vs DRAM computed")
     print("   - Performance metrics: CPU, memory, IPC calculated")
     print("   - Efficiency metrics: Performance-per-Watt computed")
+    print("   - Convergence metrics: GAN training analysis complete")
 
-    if metrics_computed >= 3:
+    if metrics_computed >= 5:
         print("\n🎉 END-TO-END TEST PASSED")
         print("   Pipeline is working correctly on real data!")
+        print("   All core metric categories computed successfully!")
         return True
     else:
         print("\n⚠️  END-TO-END TEST PARTIAL")

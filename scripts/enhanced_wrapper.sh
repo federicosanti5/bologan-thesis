@@ -823,6 +823,13 @@ start_process_monitoring() {
                 perf stat -p "$pid_list" -I $interval -x ';' --no-big-num \
                     -e cycles,instructions,cache-references,cache-misses,branches,branch-misses,page-faults,context-switches,cpu-migrations \
                     2>&1 | stdbuf -oL -eL awk -F';' '
+                        BEGIN {
+                            # Store start time (Unix timestamp) when AWK starts
+                            cmd = "date +%s.%N"
+                            cmd | getline start_unix_time
+                            close(cmd)
+                        }
+
                         # Skip comment lines
                         /^#/ { next }
 
@@ -834,8 +841,11 @@ start_process_monitoring() {
                             }
 
                             # Perf output format: timestamp;value;unit;event;time_enabled;time_running;[metric_value;metric_unit]
-                            # Ensure we have at least 6 fields, pad with empty if needed
-                            timestamp = $1
+                            # timestamp from perf is RELATIVE (seconds since perf start)
+                            # Convert to absolute Unix timestamp
+                            perf_relative_time = $1
+                            unix_timestamp = start_unix_time + perf_relative_time
+
                             value = $2
                             unit = $3
                             event = $4
@@ -844,8 +854,8 @@ start_process_monitoring() {
                             metric_value = (NF >= 7) ? $7 : ""
                             metric_unit = (NF >= 8) ? $8 : ""
 
-                            # Print as CSV
-                            print timestamp "," value "," unit "," event "," time_enabled "," time_running "," metric_value "," metric_unit
+                            # Print as CSV with Unix timestamp
+                            print unix_timestamp "," value "," unit "," event "," time_enabled "," time_running "," metric_value "," metric_unit
                             fflush()
                         }
                     ' >> "${output_prefix}_perf.csv"
@@ -1080,6 +1090,7 @@ input=$2
 config_string=$3    # Configuration string like "BNReLU_hpo27-M1"
 loading=$4          # Loading strategies (--prefetch, --cache, etc.)
 max_iter=${5:-5000} # Maximum iterations (default: 5000)
+log_interval=${6:-100}  # Logging interval (default: 100 for dense time-series)
 
 # Parse configuration string (original logic with better variable names)
 model=`echo $config_string | cut -d '_' -f 1`
@@ -1102,6 +1113,7 @@ log_info "  label_scheme: $label_scheme"
 log_info "  split_energy: $split_energy"
 log_info "loading: $loading"
 log_info "max_iter: $max_iter"
+log_info "log_interval: $log_interval"
 
 # Version detection (original logic)
 if [[ $mask == ?(n)+([0-9]) ]]; then
@@ -1139,7 +1151,7 @@ fi
 
 # Build final command
 if [[ ${task} == *'train'* ]]; then
-    command=(python3 train.py -i ${input} -m ${model} -o ../output/dataset${ds}/${version}/${config_string} -c ../config/config_${config}.json ${train_addition} --max_iter ${max_iter})
+    command=(python3 train.py -i ${input} -m ${model} -o ../output/dataset${ds}/${version}/${config_string} -c ../config/config_${config}.json ${train_addition} --max_iter ${max_iter} --log_interval ${log_interval})
 else
     command=(python3 evaluate.py -i ${input} -t ../output/dataset${ds}/${version}/${config_string} --checkpoint ${evaluate_addition} --debug --save_h5)
 fi
@@ -1193,6 +1205,75 @@ log_info "Exit code: $command_exit_code"
 # Calculate and save summary
 end_timestamp=$(date +%s)
 calculate_summary "$task" "$start_timestamp" "$end_timestamp"
+
+# Copy training output to results directory (for analysis)
+# SELECTIVE COPY: Only useful files for analysis/documentation
+if [[ ${task} == *'train'* ]] && [[ $command_exit_code -eq 0 ]]; then
+    log_section "COPYING TRAINING OUTPUT"
+    output_dir="../output/dataset${ds}/${version}/${config_string}"
+    if [[ -d "$output_dir" ]]; then
+        # Create output directory structure
+        mkdir -p "${EXPERIMENT_DIR}/training_output"
+
+        # Files to copy (selective, excluding heavy checkpoints and contaminated logs)
+        # ✓ config.json - training configuration
+        # ✓ model.txt - model architecture description
+        # ✓ *.pdf - quick visual check plots (optional but small)
+        # ✗ train.log - contaminated with historical data (use stderr.log instead)
+        # ✗ result.json - empty/unreliable (use stderr.log instead)
+        # ✗ model-*.data/index, checkpoint - heavy files not needed for analysis
+
+        log_info "Copying training artifacts (selective)..."
+
+        # Find all subdirectories (e.g., pions_eta_20_25/train/)
+        find "$output_dir" -type d | while read subdir; do
+            # Recreate directory structure
+            rel_path="${subdir#$output_dir/}"
+            if [[ -n "$rel_path" ]]; then
+                mkdir -p "${EXPERIMENT_DIR}/training_output/$rel_path"
+            fi
+        done
+
+        # Copy config.json files
+        if find "$output_dir" -name "config.json" -type f 2>/dev/null | grep -q .; then
+            find "$output_dir" -name "config.json" -type f -exec bash -c '
+                rel_path="${1#'"$output_dir"'/}"
+                cp "$1" "'"${EXPERIMENT_DIR}"'/training_output/$rel_path"
+            ' _ {} \;
+            log_info "  ✓ config.json (training configuration)"
+        fi
+
+        # Copy model.txt files
+        if find "$output_dir" -name "model.txt" -type f 2>/dev/null | grep -q .; then
+            find "$output_dir" -name "model.txt" -type f -exec bash -c '
+                rel_path="${1#'"$output_dir"'/}"
+                cp "$1" "'"${EXPERIMENT_DIR}"'/training_output/$rel_path"
+            ' _ {} \;
+            log_info "  ✓ model.txt (architecture)"
+        fi
+
+        # Copy PDF plots (small files, useful for quick check)
+        if find "$output_dir" -name "*.pdf" -type f 2>/dev/null | grep -q .; then
+            pdf_count=$(find "$output_dir" -name "*.pdf" -type f | wc -l)
+            find "$output_dir" -name "*.pdf" -type f -exec bash -c '
+                rel_path="${1#'"$output_dir"'/}"
+                cp "$1" "'"${EXPERIMENT_DIR}"'/training_output/$rel_path"
+            ' _ {} \;
+            log_info "  ✓ *.pdf plots ($pdf_count files)"
+        fi
+
+        # Create symlink for easy access
+        ln -sf "${EXPERIMENT_DIR}/training_output" "${EXPERIMENT_DIR}/output"
+
+        # Summary
+        total_size=$(du -sh "${EXPERIMENT_DIR}/training_output" 2>/dev/null | cut -f1)
+        log_info "Training artifacts copied to: ${EXPERIMENT_DIR}/training_output"
+        log_info "Total size: $total_size (checkpoints excluded to save space)"
+        log_info "Note: Loss data available in logs/train_stderr.log (cleaner than train.log)"
+    else
+        log_warn "Output directory not found: $output_dir"
+    fi
+fi
 
 cd -
 unset mask prep config config_mask model train_addition evaluate_addition loading label_scheme ds

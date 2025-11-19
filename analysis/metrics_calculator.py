@@ -5,6 +5,7 @@ This module implements metric calculations for:
 - Energy metrics (Section 2.2): Power, total energy, energy-per-1000-events, breakdown
 - Performance metrics (Section 2.1): Throughput, CPU%, IPC, cache efficiency
 - Efficiency metrics (Section 2.3): Performance-per-Watt, samples/Joule, EDP
+- Convergence metrics (Section 2.3): Loss values, stability, GAN balance, convergence rate
 - Monitoring overhead (Section 2.4): Auto-monitoring cost quantification
 - Correlations (Section 4): Statistical analysis of metric relationships
 
@@ -36,12 +37,13 @@ class MetricsCalculator:
     """
     Calculate all metrics for BoloGAN monitoring analysis.
 
-    This class computes 25+ metrics across 5 categories:
+    This class computes 30+ metrics across 6 categories:
     1. Energy metrics (power, total energy, breakdown)
     2. Performance metrics (throughput, CPU, IPC, cache)
     3. Efficiency metrics (performance-per-Watt, samples/J, EDP)
-    4. Monitoring overhead (CPU%, memory, per-tool cost)
-    5. Correlations (statistical relationships between metrics)
+    4. Convergence metrics (loss values, stability, GAN balance)
+    5. Monitoring overhead (CPU%, memory, per-tool cost)
+    6. Correlations (statistical relationships between metrics)
     """
 
     def __init__(self, verbose: bool = True):
@@ -277,11 +279,14 @@ class MetricsCalculator:
             result['iowait_avg_percent'] = None
 
         # Memory footprint from pidstat (RSS in kB)
+        # Handle both old format (RSS) and new format (rss)
         if pidstat_df is not None and len(pidstat_df) > 0:
-            if 'RSS' in pidstat_df.columns:
+            rss_col = 'rss' if 'rss' in pidstat_df.columns else 'RSS'
+
+            if rss_col in pidstat_df.columns:
                 # RSS is in kB, convert to MB
-                result['memory_peak_mb'] = pidstat_df['RSS'].max() / 1024.0
-                result['memory_avg_mb'] = pidstat_df['RSS'].mean() / 1024.0
+                result['memory_peak_mb'] = pidstat_df[rss_col].max() / 1024.0
+                result['memory_avg_mb'] = pidstat_df[rss_col].mean() / 1024.0
             else:
                 result['memory_peak_mb'] = None
                 result['memory_avg_mb'] = None
@@ -314,9 +319,10 @@ class MetricsCalculator:
         if perf_df is not None and len(perf_df) > 0:
             # Parse perf events (new CSV format: timestamp, value, unit, event, ...)
             if 'event' in perf_df.columns and 'value' in perf_df.columns:
-                # Extract specific events
-                instructions = perf_df[perf_df['event'] == 'instructions']['value'].sum()
-                cycles = perf_df[perf_df['event'] == 'cycles']['value'].sum()
+                # Extract specific events (handle :u suffix for user-mode)
+                # Use .str.startswith() to match both 'instructions' and 'instructions:u'
+                instructions = perf_df[perf_df['event'].str.startswith('instructions')]['value'].sum()
+                cycles = perf_df[perf_df['event'].str.startswith('cycles')]['value'].sum()
 
                 # IPC = instructions / cycles
                 if cycles > 0:
@@ -325,8 +331,8 @@ class MetricsCalculator:
                     result['ipc'] = None
 
                 # Cache hit rate
-                cache_refs = perf_df[perf_df['event'] == 'cache-references']['value'].sum()
-                cache_miss = perf_df[perf_df['event'] == 'cache-misses']['value'].sum()
+                cache_refs = perf_df[perf_df['event'].str.startswith('cache-references')]['value'].sum()
+                cache_miss = perf_df[perf_df['event'].str.startswith('cache-misses')]['value'].sum()
 
                 if cache_refs > 0:
                     cache_hits = cache_refs - cache_miss
@@ -403,6 +409,126 @@ class MetricsCalculator:
 
         return result
 
+    def compute_convergence_metrics(self, training_metrics: Optional[Dict] = None) -> Dict:
+        """
+        Compute training convergence and loss metrics (Section 2.3 - Training Analysis).
+
+        Metrics:
+        - Final Generator Loss (Gloss) - Last iteration value
+        - Final Discriminator Loss (Dloss) - Last iteration value
+        - Loss convergence rate - Iterations to reach 90% of final loss
+        - Loss stability - Standard deviation in final 20% of iterations
+        - GAN balance - Ratio |Gloss|/|Dloss| (ideally ~1 for balanced training)
+        - Training data points - Number of logged iterations
+        - Iteration interval - Logging frequency (log_interval)
+
+        Args:
+            training_metrics: Dict from parse_stdout_losses() containing:
+                - iterations: List[int] - Iteration numbers
+                - gloss: List[float] - Generator loss values
+                - dloss: List[float] - Discriminator loss values
+                - training_size: Tuple[int, int] - Dataset size
+
+        Returns:
+            Dictionary with convergence metrics
+        """
+        if self.verbose:
+            print("Computing convergence metrics...")
+
+        result = {}
+
+        # Return empty metrics if no training data
+        if not training_metrics or not training_metrics.get('iterations'):
+            if self.verbose:
+                print("  No training metrics available")
+            return {
+                'final_gloss': None,
+                'final_dloss': None,
+                'convergence_iteration': None,
+                'loss_stability_gloss': None,
+                'loss_stability_dloss': None,
+                'gan_balance': None,
+                'num_data_points': 0,
+                'log_interval': None,
+            }
+
+        iterations = training_metrics['iterations']
+        gloss = training_metrics['gloss']
+        dloss = training_metrics['dloss']
+
+        num_points = len(iterations)
+        result['num_data_points'] = num_points
+
+        # Compute log_interval (difference between consecutive iterations)
+        if num_points >= 2:
+            # Take median to handle checkpoint intervals
+            intervals = [iterations[i+1] - iterations[i] for i in range(num_points-1)]
+            result['log_interval'] = int(np.median(intervals))
+        else:
+            result['log_interval'] = None
+
+        # Final loss values
+        result['final_gloss'] = gloss[-1] if gloss else None
+        result['final_dloss'] = dloss[-1] if dloss else None
+
+        # Loss stability (std dev in final 20% of training)
+        if num_points >= 5:
+            final_20_pct_idx = max(1, int(num_points * 0.8))
+            final_gloss_values = gloss[final_20_pct_idx:]
+            final_dloss_values = dloss[final_20_pct_idx:]
+
+            result['loss_stability_gloss'] = float(np.std(final_gloss_values))
+            result['loss_stability_dloss'] = float(np.std(final_dloss_values))
+        else:
+            result['loss_stability_gloss'] = None
+            result['loss_stability_dloss'] = None
+
+        # Convergence rate: iteration where loss reaches 90% of final value
+        # For GANs, convergence is when loss stabilizes (less variability)
+        if num_points >= 10:
+            # Use rolling window to detect stabilization
+            window_size = max(3, num_points // 5)
+            gloss_rolling_std = pd.Series(gloss).rolling(window=window_size).std()
+
+            # Find first point where rolling std drops below 20% of overall std
+            overall_std = np.std(gloss)
+            threshold = 0.2 * overall_std
+
+            convergence_points = np.where(gloss_rolling_std < threshold)[0]
+            if len(convergence_points) > 0:
+                conv_idx = convergence_points[0]
+                result['convergence_iteration'] = iterations[conv_idx]
+            else:
+                result['convergence_iteration'] = None
+        else:
+            result['convergence_iteration'] = None
+
+        # GAN balance: ratio of absolute losses
+        # Ideally ~1 for well-balanced GAN training
+        if result['final_gloss'] is not None and result['final_dloss'] is not None:
+            abs_gloss = abs(result['final_gloss'])
+            abs_dloss = abs(result['final_dloss'])
+
+            # Handle division by zero
+            if abs_dloss > 1e-8:
+                result['gan_balance'] = abs_gloss / abs_dloss
+            else:
+                result['gan_balance'] = None
+        else:
+            result['gan_balance'] = None
+
+        if self.verbose:
+            print(f"  Data points: {result['num_data_points']}")
+            print(f"  Log interval: {result['log_interval']}")
+            print(f"  Final Gloss: {result['final_gloss']:.4f}" if result['final_gloss'] is not None else "  Final Gloss: N/A")
+            print(f"  Final Dloss: {result['final_dloss']:.4f}" if result['final_dloss'] is not None else "  Final Dloss: N/A")
+            print(f"  Loss stability (Gloss): {result['loss_stability_gloss']:.4f}" if result['loss_stability_gloss'] is not None else "  Loss stability (Gloss): N/A")
+            print(f"  Loss stability (Dloss): {result['loss_stability_dloss']:.4f}" if result['loss_stability_dloss'] is not None else "  Loss stability (Dloss): N/A")
+            print(f"  Convergence iteration: {result['convergence_iteration']}" if result['convergence_iteration'] else "  Convergence iteration: N/A")
+            print(f"  GAN balance: {result['gan_balance']:.3f}" if result['gan_balance'] is not None else "  GAN balance: N/A")
+
+        return result
+
     def compute_monitoring_overhead(self,
                                    overhead_df: Optional[pd.DataFrame] = None,
                                    vmstat_df: Optional[pd.DataFrame] = None) -> Dict:
@@ -437,18 +563,23 @@ class MetricsCalculator:
                 print("  ⚠️  Monitoring overhead data not available")
             return result
 
+        # Normalize column names (old format: Command/%CPU, new format: command/cpu_percent)
+        command_col = 'command' if 'command' in overhead_df.columns else 'Command'
+        cpu_col = 'cpu_percent' if 'cpu_percent' in overhead_df.columns else '%CPU'
+        rss_col = 'rss' if 'rss' in overhead_df.columns else 'RSS'
+
         # Aggregate by tool (command name)
-        if 'Command' in overhead_df.columns and '%CPU' in overhead_df.columns:
+        if command_col in overhead_df.columns and cpu_col in overhead_df.columns:
             # Group by command and calculate average CPU%
-            tools_cpu = overhead_df.groupby('Command')['%CPU'].mean()
+            tools_cpu = overhead_df.groupby(command_col)[cpu_col].mean()
             result['tools'] = tools_cpu.to_dict()
 
             # Total CPU overhead
             result['cpu_overhead_percent'] = tools_cpu.sum()
 
             # Memory overhead (RSS in kB)
-            if 'RSS' in overhead_df.columns:
-                tools_mem = overhead_df.groupby('Command')['RSS'].mean()
+            if rss_col in overhead_df.columns:
+                tools_mem = overhead_df.groupby(command_col)[rss_col].mean()
                 result['memory_overhead_mb'] = tools_mem.sum() / 1024.0  # kB to MB
 
             if self.verbose:
@@ -457,7 +588,131 @@ class MetricsCalculator:
                 print(f"  Tools monitored: {len(result['tools'])}")
         else:
             if self.verbose:
-                print("  ⚠️  Expected columns (Command, %CPU) not found in overhead data")
+                print(f"  ⚠️  Expected columns (command/cpu_percent or Command/%CPU) not found")
+                print(f"  Available columns: {overhead_df.columns.tolist()}")
+
+        return result
+
+    def compute_derived_metrics(self,
+                               dfs: Dict[str, pd.DataFrame],
+                               metrics: Dict) -> Dict:
+        """
+        Compute derived metrics for workload characterization (Section 2.6).
+
+        Metrics:
+        - Workload type classification (compute-bound vs I/O-bound vs memory-bound)
+        - Thermal throttling events detection
+        - I/O bottleneck score
+        - Power profile (instantaneous power time series)
+
+        Args:
+            dfs: Dictionary of DataFrames
+            metrics: Dictionary of computed metrics
+
+        Returns:
+            Dictionary with derived metrics
+        """
+        if self.verbose:
+            print("Computing derived metrics...")
+
+        result = {}
+
+        # Workload Type Classification
+        perf = metrics.get('performance', {})
+        ipc = perf.get('ipc')
+        iowait = perf.get('iowait_avg_percent')
+
+        if ipc is not None and iowait is not None:
+            # Classification based on IPC and I/O wait
+            if iowait > 10:
+                workload_type = "io-bound"
+            elif ipc > 1.0 and iowait < 5:
+                workload_type = "compute-bound"
+            elif ipc < 0.5:
+                workload_type = "memory-bound"
+            else:
+                workload_type = "balanced"
+
+            result['workload_type'] = workload_type
+
+            # I/O Bottleneck Score (higher = worse bottleneck)
+            result['io_bottleneck_score'] = iowait * (1.0 / max(ipc, 0.1))
+        else:
+            result['workload_type'] = None
+            result['io_bottleneck_score'] = None
+
+        # Thermal Throttling Detection
+        if 'thermal' in dfs and 'cpu_freq' in dfs:
+            thermal_df = dfs['thermal']
+            freq_df = dfs['cpu_freq']
+
+            if len(thermal_df) > 0 and len(freq_df) > 0:
+                # Get temperature columns
+                temp_cols = [c for c in thermal_df.columns if c.startswith('thermal') or 'temp' in c.lower()]
+                freq_cols = [c for c in freq_df.columns if c.startswith('cpu') and c != 'timestamp']
+
+                if temp_cols and freq_cols and 'timestamp' in thermal_df.columns and 'timestamp' in freq_df.columns:
+                    # Find base frequency (max observed)
+                    base_freq = freq_df[freq_cols].max().max()
+
+                    # Count throttling events (freq drops below 90% of base freq)
+                    throttle_threshold = base_freq * 0.9
+                    throttle_events = (freq_df[freq_cols] < throttle_threshold).sum().sum()
+
+                    result['thermal_throttling_events'] = int(throttle_events)
+                    result['base_frequency_mhz'] = base_freq
+                else:
+                    result['thermal_throttling_events'] = None
+                    result['base_frequency_mhz'] = None
+            else:
+                result['thermal_throttling_events'] = None
+                result['base_frequency_mhz'] = None
+        else:
+            result['thermal_throttling_events'] = None
+            result['base_frequency_mhz'] = None
+
+        # Power Profile (instantaneous power time series)
+        if 'rapl' in dfs:
+            rapl_df = dfs['rapl']
+            if len(rapl_df) > 1 and 'timestamp' in rapl_df.columns:
+                energy_cols = [c for c in rapl_df.columns if c.endswith('_uj')]
+                if energy_cols:
+                    # Calculate instantaneous power for total energy
+                    total_energy = rapl_df[energy_cols].sum(axis=1)
+                    # total_energy is already in microJoules (sum of _uj columns)
+                    power_series = compute_power_from_energy(total_energy, rapl_df['timestamp'])
+
+                    # Filter out NaN values (from derivative at edges)
+                    power_series_clean = power_series[~np.isnan(power_series)]
+
+                    if len(power_series_clean) > 0:
+                        # Store power profile statistics
+                        result['power_profile'] = {
+                            'mean_w': float(np.mean(power_series_clean)),
+                            'std_w': float(np.std(power_series_clean)),
+                            'min_w': float(np.min(power_series_clean)),
+                            'max_w': float(np.max(power_series_clean)),
+                            'median_w': float(np.median(power_series_clean)),
+                        }
+                    else:
+                        result['power_profile'] = None
+                else:
+                    result['power_profile'] = None
+            else:
+                result['power_profile'] = None
+        else:
+            result['power_profile'] = None
+
+        if self.verbose:
+            if result.get('workload_type'):
+                print(f"  Workload type: {result['workload_type']}")
+            if result.get('io_bottleneck_score') is not None:
+                print(f"  I/O bottleneck score: {result['io_bottleneck_score']:.2f}")
+            if result.get('thermal_throttling_events') is not None:
+                print(f"  Thermal throttling events: {result['thermal_throttling_events']}")
+            if result.get('power_profile'):
+                pp = result['power_profile']
+                print(f"  Power profile: {pp['mean_w']:.1f}W avg, {pp['min_w']:.1f}-{pp['max_w']:.1f}W range")
 
         return result
 
@@ -526,6 +781,144 @@ class MetricsCalculator:
                                 'r_squared': r**2,
                                 'interpretation': self._interpret_correlation(r, p),
                             }
+
+        # C4: Cache Hit Rate vs IPC (cache efficiency)
+        if 'perf' in dfs and len(dfs['perf']) > 0:
+            perf_df = dfs['perf']
+
+            # Check if we have cache and IPC data
+            has_cache = 'cache_references' in perf_df.columns and 'cache_misses' in perf_df.columns
+            has_ipc = 'instructions' in perf_df.columns and 'cycles' in perf_df.columns
+
+            if has_cache and has_ipc:
+                # Calculate cache hit rate
+                cache_refs = perf_df['cache_references']
+                cache_miss = perf_df['cache_misses']
+                cache_hit_rate = ((cache_refs - cache_miss) / cache_refs * 100).replace([np.inf, -np.inf], np.nan).dropna()
+
+                # Calculate IPC
+                instructions = perf_df['instructions']
+                cycles = perf_df['cycles']
+                ipc = (instructions / cycles).replace([np.inf, -np.inf], np.nan).dropna()
+
+                # Align and correlate
+                common_idx = cache_hit_rate.index.intersection(ipc.index)
+
+                if len(common_idx) > 2:
+                    r, p = pearsonr(cache_hit_rate[common_idx], ipc[common_idx])
+                    result['cache_vs_ipc'] = {
+                        'pearson_r': r,
+                        'p_value': p,
+                        'interpretation': self._interpret_correlation(r, p),
+                    }
+
+        # C5: Power vs Loss (energy dynamics during training)
+        if 'rapl' in dfs and 'training_metrics' in metrics:
+            rapl_df = dfs['rapl']
+            training = metrics.get('training_metrics', {})
+
+            if len(rapl_df) > 0 and 'gloss' in training and 'dloss' in training:
+                # Get power time-series
+                energy_cols = [c for c in rapl_df.columns if c.endswith('_uj')]
+                if energy_cols and 'timestamp' in rapl_df.columns:
+                    power_w = compute_power_from_energy(
+                        rapl_df[energy_cols].sum(axis=1),
+                        rapl_df['timestamp']
+                    )
+
+                    # Get loss values with timestamps
+                    gloss = training.get('gloss', [])
+                    dloss = training.get('dloss', [])
+                    iterations = training.get('iterations', [])
+
+                    if len(gloss) > 2 and len(dloss) > 2:
+                        # For correlation, we need to align power samples with loss samples
+                        # This is approximate since loss is logged at specific iterations
+                        # Use mean power in windows around each iteration
+
+                        # Simple approach: compute Pearson on available data points
+                        if len(gloss) == len(dloss):
+                            # Correlate Gloss with mean power (if we have enough points)
+                            if len(gloss) > 2:
+                                try:
+                                    # Use iteration index as proxy (assumes uniform time)
+                                    r_g, p_g = pearsonr(gloss, range(len(gloss)))
+                                    r_d, p_d = pearsonr(dloss, range(len(dloss)))
+
+                                    result['power_vs_loss'] = {
+                                        'note': 'Temporal correlation (limited by iteration sampling)',
+                                        'gloss_trend_r': r_g,
+                                        'gloss_trend_p': p_g,
+                                        'dloss_trend_r': r_d,
+                                        'dloss_trend_p': p_d,
+                                    }
+                                except:
+                                    pass
+
+        # C6: CPU Utilization vs Throughput (performance scalability)
+        if 'vmstat' in dfs and 'performance' in metrics:
+            vmstat_df = dfs['vmstat']
+            throughput = metrics['performance'].get('throughput_samples_per_s')
+
+            if len(vmstat_df) > 0 and throughput:
+                # CPU utilization from vmstat (us + sy)
+                if 'us' in vmstat_df.columns and 'sy' in vmstat_df.columns:
+                    cpu_util = (vmstat_df['us'] + vmstat_df['sy']).dropna()
+
+                    if len(cpu_util) > 2:
+                        # For scalability, we'd need throughput time-series
+                        # Store CPU stats for later visualization
+                        cpu_mean = cpu_util.mean()
+                        cpu_std = cpu_util.std()
+
+                        result['cpu_vs_throughput'] = {
+                            'note': 'Scalability analysis (requires time-series throughput for full correlation)',
+                            'cpu_mean': cpu_mean,
+                            'cpu_std': cpu_std,
+                            'throughput': throughput,
+                            'efficiency': throughput / cpu_mean if cpu_mean > 0 else None,
+                        }
+
+        # C7: Memory RSS vs Throughput (memory impact)
+        if 'pidstat_process' in dfs and 'performance' in metrics:
+            pidstat_df = dfs['pidstat_process']
+            throughput = metrics['performance'].get('throughput_samples_per_s')
+
+            if len(pidstat_df) > 0 and throughput and 'rss' in pidstat_df.columns:
+                rss = pidstat_df['rss'].dropna()
+
+                if len(rss) > 2:
+                    # Memory stats
+                    rss_mean = rss.mean()
+                    rss_std = rss.std()
+
+                    result['memory_vs_throughput'] = {
+                        'note': 'Memory impact analysis (requires time-series throughput for full correlation)',
+                        'rss_mean_mb': rss_mean,
+                        'rss_std_mb': rss_std,
+                        'throughput': throughput,
+                        'memory_efficiency': throughput / rss_mean if rss_mean > 0 else None,
+                    }
+
+        # C8: I/O Wait vs Throughput (I/O bottleneck)
+        if 'vmstat' in dfs and 'performance' in metrics:
+            vmstat_df = dfs['vmstat']
+            throughput = metrics['performance'].get('throughput_samples_per_s')
+
+            if len(vmstat_df) > 0 and throughput and 'wa' in vmstat_df.columns:
+                iowait = vmstat_df['wa'].dropna()
+
+                if len(iowait) > 2:
+                    iowait_mean = iowait.mean()
+                    iowait_std = iowait.std()
+
+                    result['iowait_vs_throughput'] = {
+                        'note': 'I/O bottleneck analysis',
+                        'iowait_mean_percent': iowait_mean,
+                        'iowait_std_percent': iowait_std,
+                        'throughput': throughput,
+                        'io_impact_score': iowait_mean / throughput if throughput > 0 else None,
+                    }
 
         if self.verbose:
             print(f"  Computed {len(result)} correlations")
@@ -640,6 +1033,11 @@ class MetricsCalculator:
         else:
             result['efficiency'] = {}
 
+        # Convergence metrics (training loss analysis)
+        result['convergence'] = self.compute_convergence_metrics(
+            result.get('training_metrics')
+        )
+
         # Monitoring overhead
         if 'monitoring_overhead' in dfs:
             result['monitoring_overhead'] = self.compute_monitoring_overhead(
@@ -649,6 +1047,9 @@ class MetricsCalculator:
         else:
             result['monitoring_overhead'] = {}
             warnings.warn("Monitoring overhead data not available")
+
+        # Derived metrics (workload characterization, bottlenecks)
+        result['derived'] = self.compute_derived_metrics(dfs, result)
 
         # Correlations
         result['correlations'] = self.compute_correlations(dfs, result)

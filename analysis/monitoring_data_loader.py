@@ -286,6 +286,12 @@ class MonitoringDataLoader:
                 resampled[key] = df
                 continue
 
+            # Skip perf data - it has multiple events per timestamp
+            # Resampling would lose event distinction
+            if key == 'perf':
+                resampled[key] = df
+                continue
+
             try:
                 # Resample with appropriate aggregation
                 if key in ['rapl', 'process_io']:

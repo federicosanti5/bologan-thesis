@@ -9,6 +9,7 @@ This module provides helper functions for:
 """
 
 import re
+import warnings
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Union
@@ -78,15 +79,16 @@ def handle_rapl_overflow(energy_series: pd.Series,
     return pd.Series(corrected, index=energy_series.index)
 
 
-def parse_stdout_losses(stdout_path: str) -> Dict[str, Union[List[float], List[int]]]:
+def parse_stdout_losses(stdout_path: str, stderr_path: str = None) -> Dict[str, Union[List[float], List[int]]]:
     """
-    Parse training losses and metrics from stdout.log file.
+    Parse training losses and metrics from stdout.log and/or stderr.log file.
 
     Extracts from lines like:
     "Iter: 1000; Dloss: -0.0991; Gloss: -0.2144; TotalTime: 599.04; ..."
 
     Args:
         stdout_path: Path to train_stdout.log file
+        stderr_path: Path to train_stderr.log file (optional, will try to infer if not provided)
 
     Returns:
         Dictionary with:
@@ -99,13 +101,18 @@ def parse_stdout_losses(stdout_path: str) -> Dict[str, Union[List[float], List[i
             - 'training_size': Tuple (num_samples, num_features) or None
 
     Example:
-        >>> metrics = parse_stdout_losses('logs/train_stdout.log')
+        >>> metrics = parse_stdout_losses('logs/train_stdout.log', 'logs/train_stderr.log')
         >>> print(f"Iterations: {len(metrics['iterations'])}")
         >>> print(f"Final Gloss: {metrics['gloss'][-1]:.4f}")
 
     Raises:
         FileNotFoundError: If stdout_path doesn't exist
         ValueError: If no valid training data found in file
+
+    Notes:
+        - Training size is typically in stdout
+        - Loss values may be in stdout or stderr (depends on logging configuration)
+        - If stderr_path is not provided, will try stdout_path.replace('stdout', 'stderr')
     """
     iterations = []
     dloss_values = []
@@ -125,15 +132,25 @@ def parse_stdout_losses(stdout_path: str) -> Dict[str, Union[List[float], List[i
         r'(?:.*TrainLoop:\s*([-+]?\d*\.?\d+))?'
     )
 
-    size_pattern = re.compile(r'Training size X: \((\d+),\s*(\d+)\)')
+    # Multiple patterns for training size (different formats)
+    size_pattern1 = re.compile(r'Training size X:\s*\((\d+),\s*(\d+)\)')
+    size_pattern2 = re.compile(r'Training size[^\(]*\((\d+),\s*(\d+)\)')  # More flexible
 
+    # If stderr_path not provided, infer from stdout_path
+    if stderr_path is None:
+        stderr_path = stdout_path.replace('stdout.log', 'stderr.log')
+
+    # Parse stdout first (for training_size and potential loss values)
     try:
         with open(stdout_path, 'r') as f:
             for line in f:
-                # Parse training size
-                size_match = size_pattern.search(line)
-                if size_match and training_size is None:
-                    training_size = (int(size_match.group(1)), int(size_match.group(2)))
+                # Parse training size (try multiple patterns)
+                if training_size is None:
+                    size_match = size_pattern1.search(line)
+                    if not size_match:
+                        size_match = size_pattern2.search(line)
+                    if size_match:
+                        training_size = (int(size_match.group(1)), int(size_match.group(2)))
 
                 # Parse iteration metrics
                 iter_match = iter_pattern.search(line)
@@ -153,8 +170,45 @@ def parse_stdout_losses(stdout_path: str) -> Dict[str, Union[List[float], List[i
     except FileNotFoundError:
         raise FileNotFoundError(f"stdout.log not found: {stdout_path}")
 
+    # If no iterations found in stdout, try stderr (loss values may be there)
     if len(iterations) == 0:
-        raise ValueError(f"No training iteration data found in {stdout_path}")
+        from pathlib import Path
+        if Path(stderr_path).exists():
+            try:
+                with open(stderr_path, 'r') as f:
+                    for line in f:
+                        # Parse training size from stderr too (may be duplicated there)
+                        if training_size is None:
+                            size_match = size_pattern1.search(line)
+                            if not size_match:
+                                size_match = size_pattern2.search(line)
+                            if size_match:
+                                training_size = (int(size_match.group(1)), int(size_match.group(2)))
+
+                        # Parse iteration metrics
+                        iter_match = iter_pattern.search(line)
+                        if iter_match:
+                            iterations.append(int(iter_match.group(1)))
+                            dloss_values.append(float(iter_match.group(2)))
+                            gloss_values.append(float(iter_match.group(3)))
+                            total_times.append(float(iter_match.group(4)))
+
+                            # Optional fields (may be None)
+                            get_next = iter_match.group(5)
+                            train_loop = iter_match.group(6)
+
+                            get_next_times.append(float(get_next) if get_next else 0.0)
+                            train_loop_times.append(float(train_loop) if train_loop else 0.0)
+
+            except (FileNotFoundError, IOError):
+                pass  # stderr not found or not readable, continue with what we have
+
+    # Allow parsing even without iteration data if we found training_size
+    if len(iterations) == 0 and training_size is None:
+        raise ValueError(f"No training iteration data or training size found in {stdout_path} or {stderr_path}")
+    elif len(iterations) == 0:
+        # No iterations but we have training_size - still useful
+        warnings.warn(f"No training iteration data found in {stdout_path} or {stderr_path}, but training_size parsed")
 
     return {
         'iterations': iterations,
@@ -227,22 +281,49 @@ def resample_to_grid(df: pd.DataFrame,
     # Set timestamp as index for resampling
     df = df.set_index(timestamp_col)
 
-    # Resample based on aggregation method
-    if aggregation == 'mean':
-        df_resampled = df.resample(freq).mean()
-    elif aggregation == 'sum':
-        df_resampled = df.resample(freq).sum()
-    elif aggregation == 'max':
-        df_resampled = df.resample(freq).max()
-    elif aggregation == 'min':
-        df_resampled = df.resample(freq).min()
-    elif aggregation == 'median':
-        df_resampled = df.resample(freq).median()
-    else:
-        raise ValueError(f"Unknown aggregation method: {aggregation}")
+    # Separate numeric and non-numeric columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    non_numeric_cols = df.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    # Forward-fill NaN values (assume previous value persists)
-    df_resampled = df_resampled.ffill()
+    # Resample numeric columns with specified aggregation
+    if len(numeric_cols) > 0:
+        df_numeric = df[numeric_cols]
+
+        if aggregation == 'mean':
+            df_numeric_resampled = df_numeric.resample(freq).mean()
+        elif aggregation == 'sum':
+            df_numeric_resampled = df_numeric.resample(freq).sum()
+        elif aggregation == 'max':
+            df_numeric_resampled = df_numeric.resample(freq).max()
+        elif aggregation == 'min':
+            df_numeric_resampled = df_numeric.resample(freq).min()
+        elif aggregation == 'median':
+            df_numeric_resampled = df_numeric.resample(freq).median()
+        else:
+            raise ValueError(f"Unknown aggregation method: {aggregation}")
+
+        # Forward-fill NaN values
+        df_numeric_resampled = df_numeric_resampled.ffill()
+    else:
+        df_numeric_resampled = pd.DataFrame()
+
+    # Resample non-numeric columns (take first value in each bin)
+    if len(non_numeric_cols) > 0:
+        df_non_numeric = df[non_numeric_cols]
+        df_non_numeric_resampled = df_non_numeric.resample(freq).first()
+
+        # Forward-fill NaN values
+        df_non_numeric_resampled = df_non_numeric_resampled.ffill()
+    else:
+        df_non_numeric_resampled = pd.DataFrame()
+
+    # Combine numeric and non-numeric columns
+    if len(numeric_cols) > 0 and len(non_numeric_cols) > 0:
+        df_resampled = pd.concat([df_numeric_resampled, df_non_numeric_resampled], axis=1)
+    elif len(numeric_cols) > 0:
+        df_resampled = df_numeric_resampled
+    else:
+        df_resampled = df_non_numeric_resampled
 
     # Reset index to have timestamp as column again
     df_resampled = df_resampled.reset_index()
@@ -308,7 +389,7 @@ def compute_power_from_energy(energy_uj: pd.Series,
 
     Args:
         energy_uj: Cumulative energy in microJoules (already overflow-corrected)
-        timestamp_s: Timestamps in seconds (Unix epoch with decimals)
+        timestamp_s: Timestamps in seconds (Unix epoch with decimals) or datetime64
 
     Returns:
         Instantaneous power in Watts
@@ -323,10 +404,17 @@ def compute_power_from_energy(energy_uj: pd.Series,
         - First value is NaN (no previous point for delta)
         - Converts microJoules to Joules (÷ 1e6)
         - Handles irregular sampling intervals
+        - Handles both numeric seconds and datetime64 timestamps
     """
     # Compute deltas
     delta_energy_uj = energy_uj.diff()  # microJoules
-    delta_time_s = timestamp_s.diff()   # seconds
+    delta_time = timestamp_s.diff()
+
+    # Convert delta_time to seconds if it's timedelta64
+    if pd.api.types.is_timedelta64_dtype(delta_time):
+        delta_time_s = delta_time.dt.total_seconds()
+    else:
+        delta_time_s = delta_time  # already in seconds
 
     # Convert microJoules to Joules
     delta_energy_j = delta_energy_uj / 1e6

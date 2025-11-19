@@ -112,6 +112,7 @@ OPTIONS:
                             Format: MODEL_CONFIG-MASK[OPTIONAL_FLAGS]
                             Examples: BNReLU_hpo27-M1, LeakyReLU_hpo15-M2-P1-L3
     -m, --max-iter NUM      Maximum iterations for training (default: 5000)
+    --log-interval NUM      Logging interval in iterations (default: 100 for dense time-series)
     -l, --loading ARGS      Data loading/preprocessing args (e.g., "--mask 5.0 --debug --add_noise")
                             Valid loading args: --mask NUM, --debug, --add_noise, --loading MODEL_PATH
     -b, --batch-size NUM    Batch size (if supported by config)
@@ -132,8 +133,9 @@ CONFIGURATION STRING FORMAT:
 
 EXAMPLES:
     $0 setup                                    # Check prerequisites
-    $0 train                                    # Basic training
-    $0 train -m 10000 -n "extended"             # Extended training
+    $0 train                                    # Basic training (500 iter, 100 log interval)
+    $0 train -m 10000 --log-interval 200        # Extended training with 200 iter logging
+    $0 train -m 500 --log-interval 50           # Quick test (11 log points)
     $0 train -l "--mask 5.0 --debug"            # Training with masking and debug
     $0 train -l "--add_noise" -m 8000           # Training with data augmentation
     $0 evaluate                                 # Evaluate last training
@@ -449,17 +451,19 @@ run_experiment() {
     local config_string=${3:-$DEFAULT_CONFIG_STRING}
     local loading_args=${4:-""}
     local max_iter=${5:-5000}
+    local log_interval=${6:-100}
 
     log_section "EXPERIMENT EXECUTION"
 
     # Setting variable about version
     export APPTAINERENV_APPTAINER_VERSION=$(apptainer --version | cut -d' ' -f3)
-    
+
     log_info "Task: $task"
     log_info "Dataset: $dataset"
     log_info "Configuration: $config_string"
     log_info "Loading args: ${loading_args:-'(none)'}"
     log_info "Max iterations: $max_iter"
+    log_info "Log interval: $log_interval"
     
     # Check if we're in a SLURM environment
     if [ ! -z "$SLURM_JOB_ID" ]; then
@@ -471,7 +475,7 @@ run_experiment() {
     # Enter container and run enhanced wrapper
     if [ "$USE_CONTAINER" = "true" ]; then
         log_info "Using container: $CONTAINER_PATH"
-        setsid apptainer exec "$CONTAINER_PATH" bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter" &
+        setsid apptainer exec "$CONTAINER_PATH" bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter" "$log_interval" &
         APPTAINER_PID=$!
 
         log_info "Container process started (PID: $APPTAINER_PID)"
@@ -490,7 +494,7 @@ run_experiment() {
         return $exit_code
     else
         log_warn "Running without container (not recommended)"
-        bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter"
+        bash "$ENHANCED_WRAPPER" "$task" "$dataset" "$config_string" "$loading_args" "$max_iter" "$log_interval"
         local exit_code=$?
 
         local exp_dir=$(find "$RESULTS_DIR/monitoring" -name "exp_*" -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
@@ -630,7 +634,8 @@ trap cleanup_runner INT TERM
 DATASET="$DEFAULT_DATASET"
 CONFIG_STRING="$DEFAULT_CONFIG_STRING"
 LOADING_ARGS=""      # Data loading optimizations
-MAX_ITER=5000        # Training iterations
+MAX_ITER=5000        # Training iterations (default: standard cluster training)
+LOG_INTERVAL=100     # Logging interval (default: dense time-series)
 BATCH_SIZE=""
 EXP_NAME=""
 USE_CONTAINER=true
@@ -650,6 +655,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -m|--max-iter)
             MAX_ITER="$2"
+            shift 2
+            ;;
+        --log-interval)
+            LOG_INTERVAL="$2"
             shift 2
             ;;
         -l|--loading)
@@ -718,8 +727,8 @@ case "$COMMAND" in
         ;;
     train)
         check_experiment_prerequisites || exit 1
-        validate_arguments "$COMMAND" || exit 1        
-        run_experiment "train" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS" "$MAX_ITER"
+        validate_arguments "$COMMAND" || exit 1
+        run_experiment "train" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS" "$MAX_ITER" "$LOG_INTERVAL"
         ;;
     evaluate)
         check_experiment_prerequisites || exit 1
@@ -729,10 +738,10 @@ case "$COMMAND" in
     full)
         check_experiment_prerequisites || exit 1
         validate_arguments "$COMMAND" || exit 1
-        
+
         log_section "FULL TRAINING + EVALUATION CYCLE"
-        
-        run_experiment "train" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS" "$MAX_ITER"
+
+        run_experiment "train" "$DATASET" "$CONFIG_STRING" "$LOADING_ARGS" "$MAX_ITER" "$LOG_INTERVAL"
         local train_exit=$?
 
         if [ $train_exit -eq 0 ]; then
