@@ -717,7 +717,7 @@ start_monitoring() {
                         # Monitor wrapper and all its monitoring children using PGID
                         # Since we use setsid, each monitoring tool runs in its own process group
                         # The PID saved in monitoring_pids.txt is the shell (sh -c) which is also the PGID
-                        # We use pidstat -g to monitor the entire process group (shell + actual tools)
+                        # We enumerate all PIDs in each process group to monitor shell + actual tools
 
                         monitoring_pgids="$wrapper_pid"
                         while read -r mpid; do
@@ -727,10 +727,28 @@ start_monitoring() {
                             fi
                         done < "${EXPERIMENT_DIR}/monitoring_pids.txt"
 
-                        # Execute pidstat on all monitoring process groups (-g for PGID)
+                        # Since pidstat -g is not supported in many versions, we enumerate all PIDs
+                        # in each process group and monitor them individually
+                        all_pids=""
+                        for pgid in $(echo "$monitoring_pgids" | tr ',' ' '); do
+                            # Get all PIDs in this process group (shell + actual tools)
+                            # Remove leading/trailing whitespace from each PID
+                            group_pids=$(ps -o pid= -g "$pgid" 2>/dev/null | tr -d ' ' | tr '\n' ',' | sed 's/,$//')
+                            if [[ -n "$group_pids" ]]; then
+                                if [[ -z "$all_pids" ]]; then
+                                    all_pids="$group_pids"
+                                else
+                                    all_pids="$all_pids,$group_pids"
+                                fi
+                            fi
+                        done
+
+                        # Execute pidstat on all PIDs found in monitoring process groups
                         # This will capture the actual tools (vmstat, iostat, etc.) running inside each shell
-                        LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -g "$monitoring_pgids" "${SYSTEM_SAMPLE_SECS}" 1 \
-                        | pidstat_to_csv
+                        if [[ -n "$all_pids" ]]; then
+                            LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -p "$all_pids" "${SYSTEM_SAMPLE_SECS}" 1 \
+                            | pidstat_to_csv
+                        fi
                     else
                         # Fallback: monitor only wrapper
                         LC_ALL=C LANG=C pidstat -h -u -r -d -w -l -p "$wrapper_pid" "${SYSTEM_SAMPLE_SECS}" 1 \
@@ -744,7 +762,7 @@ start_monitoring() {
             } > "${sys_prefix}_monitoring_overhead.csv" 2> "${sys_prefix_log}_monitoring_overhead.log" &
 
             add_monitoring_pid $! "monitoring_overhead"
-            log_info "Self-monitoring: enabled (tracking wrapper + all monitoring process groups via PGID)"
+            log_info "Self-monitoring: enabled (tracking wrapper + all monitoring tools via process group enumeration)"
         else
             log_warn "Self-monitoring: wrapper PID not available, skipping overhead measurement"
         fi
