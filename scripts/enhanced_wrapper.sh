@@ -862,8 +862,8 @@ start_process_monitoring() {
                             metric_value = (NF >= 7) ? $7 : ""
                             metric_unit = (NF >= 8) ? $8 : ""
 
-                            # Print as CSV with Unix timestamp
-                            print unix_timestamp "," value "," unit "," event "," time_enabled "," time_running "," metric_value "," metric_unit
+                            # Print as CSV with Unix timestamp (use printf to avoid scientific notation)
+                            printf "%.6f,%s,%s,%s,%s,%s,%s,%s\n", unix_timestamp, value, unit, event, time_enabled, time_running, metric_value, metric_unit
                             fflush()
                         }
                     ' >> "${output_prefix}_perf.csv"

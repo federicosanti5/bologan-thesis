@@ -932,6 +932,12 @@ class MonitoringVisualizer:
 
             # Merge with existing data to get power per point
             if perf_df is not None and len(merged) > 0:
+                # Debug: check timestamp_rel before merge
+                print(f"  [DEBUG] BEFORE POWER MERGE:")
+                print(f"    merged timestamp_rel range: [{merged['timestamp_rel'].min():.2f}, {merged['timestamp_rel'].max():.2f}]")
+                print(f"    rapl timestamp_rel range: [{rapl_df['timestamp_rel'].min():.2f}, {rapl_df['timestamp_rel'].max():.2f}]")
+                print(f"    rapl power_total range: [{rapl_df['power_total'].min():.2f}, {rapl_df['power_total'].max():.2f}]")
+
                 # Add timestamp_rel to merged for power merge
                 merged_with_power = pd.merge_asof(
                     merged.sort_values('timestamp_rel'),
@@ -941,9 +947,18 @@ class MonitoringVisualizer:
                     tolerance=2.0
                 ).dropna()
 
+                print(f"  [DEBUG] AFTER POWER MERGE:")
+                print(f"    merged_with_power rows: {len(merged_with_power)} (from {len(merged)})")
+
                 if len(merged_with_power) > 0:
                     power_values = merged_with_power['power_total'].values
                     timestamps = merged_with_power['timestamp_rel'].values
+
+                    print(f"    power_values range: [{power_values.min():.2f}, {power_values.max():.2f}]")
+                    print(f"    timestamps range: [{timestamps.min():.2f}, {timestamps.max():.2f}]")
+                    print(f"    Unique power values: {len(np.unique(power_values))}")
+                    print(f"    Unique timestamps: {len(np.unique(timestamps))}")
+
                     # Update ipc/iowait arrays to match
                     ipc_values = merged_with_power['ipc'].values
                     iowait_values = merged_with_power['wa'].values
@@ -1274,9 +1289,9 @@ class MonitoringVisualizer:
                         df['timestamp_rel'] = df['timestamp']
                         return df
 
-                # Convert to datetime if not already (Unix timestamps)
+                # Convert to datetime if not already (Unix timestamps in seconds)
                 if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 df['timestamp_rel'] = (df['timestamp'] - df['timestamp'].iloc[0]).dt.total_seconds()
             else:
                 # Fallback: use index as seconds
